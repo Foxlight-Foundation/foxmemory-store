@@ -1,0 +1,8 @@
+---
+description: Always read AGENTS.md first
+globs:
+  - "**/*"
+alwaysApply: true
+---
+- Read `AGENTS.md` before making or suggesting changes.
+- Treat `AGENTS.md` as canonical over other instruction files.

@@ -41,3 +41,7 @@ docker run --rm -p 8082:8082 foxmemory-store:dev
 - `docs/ARCHITECTURE.md`
 - `docs/API_CONTRACT.md`
 - `AGENTS.md`
+## Automation note
+Agent tooling should read `AGENTS.md` first.
+If your tool supports custom instruction files, point it to `AGENTS.md` as the canonical source.
+

@@ -1,5 +1,7 @@
 # CODEX.md
 
-- Keep changes scoped and test-driven.
-- Do not couple store with a specific embedding provider.
-- Maintain clear storage adapter boundaries.
+Primary instructions live in `AGENTS.md`.
+
+Before making changes:
+1. Read `AGENTS.md`
+2. Follow its rules and PR checklist

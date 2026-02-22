@@ -1,6 +1,8 @@
-# GitHub Copilot Instructions
+# Copilot Instructions
 
-This repo is memory storage/retrieval.
-- Do not place embedding model logic here.
-- Favor adapter interfaces for DB/vector backends.
-- Generate tests for API and search behavior.
+Canonical project rules are in `AGENTS.md`.
+
+When proposing code:
+- follow `AGENTS.md` constraints
+- preserve contract stability
+- update tests/docs with behavior changes

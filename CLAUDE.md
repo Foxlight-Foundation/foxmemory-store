@@ -1,5 +1,7 @@
 # CLAUDE.md
 
-- Read `AGENTS.md` before changes.
-- Preserve endpoint compatibility unless versioned.
-- Update docs and tests with all behavior edits.
+Primary instructions live in `AGENTS.md`.
+
+Before making changes:
+1. Read `AGENTS.md`
+2. Follow its rules and PR checklist
