@@ -1,0 +1,10 @@
+---
+description: Rules for Cursor in foxmemory-store
+globs:
+  - "src/**/*.py"
+  - "tests/**/*.py"
+alwaysApply: true
+---
+- Keep store/infer separation strict.
+- Preserve API endpoints and response shape.
+- Update tests/docs with every behavior change.
