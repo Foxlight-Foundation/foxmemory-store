@@ -1,5 +1,8 @@
-FROM alpine:3.20
-RUN adduser -D app
-USER app
+FROM python:3.12-slim
 WORKDIR /app
-CMD ["sh", "-lc", "echo container scaffold ready; sleep infinity"]
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY src ./src
+ENV PYTHONPATH=/app/src
+EXPOSE 8082
+CMD ["gunicorn", "--bind", "0.0.0.0:8082", "foxmemory_store.main:app"]

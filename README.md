@@ -1,7 +1,14 @@
 # foxmemory-store
 
-Initial scaffold for Foxlight Foundation memory infrastructure.
+Memory storage API scaffold.
 
-## Status
+## API
+- `GET /health`
+- `POST /memory.write`
+- `POST /memory.search`
 
-Scaffolded v0.
+## Run locally
+```bash
+pip install -r requirements.txt
+PYTHONPATH=src uvicorn foxmemory_store.main:app --reload --port 8082
+```
