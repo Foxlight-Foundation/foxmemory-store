@@ -1,0 +1,16 @@
+name: instruction-consistency
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check agent instruction consistency
+        run: ./scripts/check-agent-instructions.sh
