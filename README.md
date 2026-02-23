@@ -1,18 +1,80 @@
 # foxmemory-store
 
-Node.js + TypeScript Mem0 OSS REST API service.
+Beginner-friendly memory API service for self-hosted AI apps.
 
-## Purpose
-Self-hosted memory API layer for FoxMemory. Designed to run with either:
-- local `foxmemory-infer` (OpenAI-compatible endpoints), or
-- any external OpenAI-compatible inference provider.
+`foxmemory-store` is the "memory brain" API in the FoxMemory stack. It wraps Mem0 OSS and exposes simple REST endpoints for writing and searching memories.
 
-## Runtime
+## Why this exists
+
+Most AI apps are stateless by default. This service adds long-term memory so your assistants can remember useful facts across conversations.
+
+## What it does
+
+- Accepts memory writes (messages, metadata, user IDs)
+- Supports semantic search over prior memories
+- Provides read/delete endpoints
+- Uses Mem0 OSS under the hood
+- Can point to local inference (`foxmemory-infer`) or external OpenAI-compatible inference
+
+## Architecture in plain English
+
+1. Your app sends a memory write/search request to `foxmemory-store`
+2. `foxmemory-store` asks an LLM/embedder provider for processing
+3. Embeddings + memory records are stored in Qdrant
+4. Search returns relevant memory snippets
+
+See also: `docs/ARCHITECTURE.md` and `docs/API_CONTRACT.md`.
+
+---
+
+## Requirements
+
 - Node.js 22+
-- TypeScript
-- Mem0 OSS (`mem0ai/oss`)
+- npm 10+
+- A vector store (Qdrant)
+- An OpenAI-compatible inference API (local or hosted)
 
-## Endpoints
+## Quick start (local dev)
+
+```bash
+npm install
+npm run dev
+```
+
+Default port: `8082`
+
+Health check:
+
+```bash
+curl -s http://localhost:8082/health | jq .
+```
+
+---
+
+## Environment variables
+
+### Inference provider (OpenAI-compatible)
+
+- `OPENAI_BASE_URL` — e.g. `http://localhost:8081/v1`
+- `OPENAI_API_KEY` — required by many providers
+- `MEM0_LLM_MODEL` — default `gpt-4.1-nano`
+- `MEM0_EMBED_MODEL` — default `text-embedding-3-small`
+
+### Vector store (Qdrant)
+
+- `QDRANT_HOST`
+- `QDRANT_PORT` (default `6333`)
+- `QDRANT_API_KEY` (optional)
+- `QDRANT_COLLECTION` (default `foxmemory`)
+
+### Local history DB
+
+- `MEM0_HISTORY_DB_PATH` (default `/tmp/history.db`)
+
+---
+
+## API endpoints
+
 - `GET /health`
 - `POST /v1/memories`
 - `POST /v1/memories/search`
@@ -21,38 +83,57 @@ Self-hosted memory API layer for FoxMemory. Designed to run with either:
 - `DELETE /v1/memories/:id`
 
 Back-compat aliases:
+
 - `POST /memory.write`
 - `POST /memory.search`
 
-## Inference provider contract (OpenAI-compatible)
-- `OPENAI_BASE_URL` (example local infer: `http://foxmemory-infer:8081/v1`)
-- `OPENAI_API_KEY` (optional depending on provider)
-- `MEM0_LLM_MODEL` (default `gpt-4.1-nano`)
-- `MEM0_EMBED_MODEL` (default `text-embedding-3-small`)
+Detailed request/response examples: `docs/API_CONTRACT.md`
 
-## Vector/history config
-- `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_API_KEY` / `QDRANT_COLLECTION`
-- `MEM0_HISTORY_DB_PATH` (default `/tmp/history.db`)
+---
 
-## Embedded Qdrant mode
-This image bundles Qdrant and starts it automatically inside the same container.
+## Basic usage examples
 
-Default behavior:
-- Qdrant listens on `127.0.0.1:6333` inside the container
-- Store API listens on `0.0.0.0:8082`
+### Write memory
 
-Useful env vars:
-- `QDRANT_STORAGE_PATH` (default `/qdrant/storage`)
-- `QDRANT_HTTP_PORT` (default `6333`)
-
-## Local run
 ```bash
-npm install
-npm run dev
+curl -s -X POST http://localhost:8082/v1/memories \
+  -H 'content-type: application/json' \
+  -d '{
+    "user_id":"demo",
+    "messages":[{"role":"user","content":"I prefer concise answers."}]
+  }'
 ```
 
-## Build + start
+### Search memory
+
+```bash
+curl -s -X POST http://localhost:8082/v1/memories/search \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"demo","query":"response style","top_k":5}'
+```
+
+---
+
+## Docker notes
+
+This repo includes an image that can run an embedded Qdrant process in the same container.
+
+If startup issues occur, check:
+
+1. Qdrant reachability (`QDRANT_HOST/QDRANT_PORT`)
+2. Inference API URL correctness (`OPENAI_BASE_URL`)
+3. API key wiring (`OPENAI_API_KEY`)
+4. Writable history DB path (`MEM0_HISTORY_DB_PATH`)
+
+---
+
+## Build and run (production-ish)
+
 ```bash
 npm run build
 npm start
 ```
+
+## License
+
+MIT (see `LICENSE`)
