@@ -23,7 +23,7 @@ jobs:
       - name: Check Docker Hub secrets
         id: secrets
         env:
-          DH_USER: ${{ secrets.foxlightfoundation }}
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
           DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
@@ -36,7 +36,7 @@ jobs:
         if: steps.secrets.outputs.ready == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.foxlightfoundation }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push (Docker Hub)
@@ -53,4 +53,4 @@ jobs:
         if: steps.secrets.outputs.ready != 'true'
         run: |
           echo "Docker Hub secrets are not configured."
-          echo "Set foxlightfoundation and DOCKERHUB_TOKEN in repo secrets to enable publish."
+          echo "Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in repo secrets to enable publish."
