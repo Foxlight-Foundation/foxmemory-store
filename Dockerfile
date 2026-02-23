@@ -1,14 +1,14 @@
-FROM python:3.12-slim
+FROM node:22-alpine
 
-RUN groupadd -r app && useradd -r -g app app
+RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY package.json ./
+RUN npm install --omit=dev
+COPY tsconfig.json ./
 COPY src ./src
-RUN chown -R app:app /app
+RUN npm install && npm run build && npm prune --omit=dev
 
 USER app
-ENV PYTHONPATH=/app/src
 EXPOSE 8082
-CMD ["gunicorn", "--bind", "0.0.0.0:8082", "foxmemory_store.main:app"]
+CMD ["node", "dist/index.js"]

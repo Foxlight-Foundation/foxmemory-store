@@ -1,47 +1,43 @@
 # foxmemory-store
 
-Memory storage/retrieval API service for FoxMemory.
+Node.js + TypeScript Mem0 OSS REST API service.
 
-## Why this exists
-`foxmemory-store` is the durable memory layer. It stores memory entries and serves query-time retrieval.
+## Purpose
+This service is the self-hosted memory API layer for FoxMemory, aligned with Mem0-style memory operations.
 
-Goals:
-- clear API contract for writes/search
-- pluggable backend strategy (metadata DB + vector index)
-- deployment-friendly on local/self-hosted infra
+## Runtime
+- Node.js 22+
+- TypeScript
+- Mem0 OSS (`mem0ai/oss`)
 
-## What it does (current scaffold)
+## Endpoints
 - `GET /health`
+- `POST /v1/memories`
+- `POST /v1/memories/search`
+- `GET /v1/memories/:id`
+- `GET /v1/memories?user_id=...&run_id=...`
+- `DELETE /v1/memories/:id`
+
+Back-compat aliases:
 - `POST /memory.write`
 - `POST /memory.search`
 
-Current implementation is in-memory only for scaffold/testing.
-
-## Local usage
+## Local run
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-PYTHONPATH=src gunicorn --bind 0.0.0.0:8082 foxmemory_store.main:app
+npm install
+npm run dev
 ```
 
-## Container usage
+## Build + start
 ```bash
-docker build -t foxmemory-store:dev .
-docker run --rm -p 8082:8082 foxmemory-store:dev
+npm run build
+npm start
 ```
 
-## Roadmap
-- durable metadata store (Postgres)
-- vector backend integration
-- hybrid retrieval (semantic + keyword + filters)
-- retention/consolidation workers
-
-## Docs
-- `docs/ARCHITECTURE.md`
-- `docs/API_CONTRACT.md`
-- `AGENTS.md`
-## Automation note
-Agent tooling should read `AGENTS.md` first.
-If your tool supports custom instruction files, point it to `AGENTS.md` as the canonical source.
-
+## Env vars
+- `PORT` (default `8082`)
+- `OPENAI_API_KEY` (optional)
+- `MEM0_LLM_MODEL` (optional)
+- `MEM0_EMBED_MODEL` (optional)
+- `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_API_KEY` / `QDRANT_COLLECTION` (optional)
+- `MEM0_HISTORY_DB_PATH` (optional)
