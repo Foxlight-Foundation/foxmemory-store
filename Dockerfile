@@ -10,5 +10,6 @@ COPY src ./src
 RUN npm install && npm run build && npm prune --omit=dev
 
 USER app
+ENV HOME=/tmp
 EXPOSE 8082
 CMD ["node", "dist/index.js"]

@@ -9,6 +9,7 @@ const PORT = Number(process.env.PORT || 8082);
 
 const memory = new Memory({
   version: "v1.1",
+  historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
   // Optional provider overrides via env for quick self-host deploys
   ...(process.env.OPENAI_API_KEY
     ? {
