@@ -9,7 +9,10 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm install && npm run build && npm prune --omit=dev
 
+RUN mkdir -p /tmp/mem0 && chown -R app:app /tmp/mem0 /app
+
 USER app
 ENV HOME=/tmp
+ENV MEM0_DIR=/tmp/mem0
 EXPOSE 8082
 CMD ["node", "dist/index.js"]
