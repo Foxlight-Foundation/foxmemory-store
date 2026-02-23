@@ -7,22 +7,30 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 8082);
 
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
+const LLM_MODEL = process.env.MEM0_LLM_MODEL || "gpt-4.1-nano";
+const EMBED_MODEL = process.env.MEM0_EMBED_MODEL || "text-embedding-3-small";
+
 const memory = new Memory({
   version: "v1.1",
   historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
-  // Optional provider overrides via env for quick self-host deploys
-  ...(process.env.OPENAI_API_KEY
-    ? {
-        llm: {
-          provider: "openai",
-          config: { apiKey: process.env.OPENAI_API_KEY, model: process.env.MEM0_LLM_MODEL || "gpt-4.1-nano" }
-        },
-        embedder: {
-          provider: "openai",
-          config: { apiKey: process.env.OPENAI_API_KEY, model: process.env.MEM0_EMBED_MODEL || "text-embedding-3-small" }
-        }
-      }
-    : {}),
+  llm: {
+    provider: "openai",
+    config: {
+      apiKey: OPENAI_API_KEY,
+      model: LLM_MODEL,
+      ...(OPENAI_BASE_URL ? { openaiBaseUrl: OPENAI_BASE_URL } : {})
+    }
+  },
+  embedder: {
+    provider: "openai",
+    config: {
+      apiKey: OPENAI_API_KEY,
+      model: EMBED_MODEL,
+      ...(OPENAI_BASE_URL ? { openaiBaseUrl: OPENAI_BASE_URL } : {})
+    }
+  },
   ...(process.env.QDRANT_HOST
     ? {
         vectorStore: {
@@ -35,12 +43,19 @@ const memory = new Memory({
           }
         }
       }
-    : {}),
-  ...(process.env.MEM0_HISTORY_DB_PATH ? { historyDbPath: process.env.MEM0_HISTORY_DB_PATH } : {})
+    : {})
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "foxmemory-store", runtime: "node-ts", mem0: "oss" });
+  res.json({
+    ok: true,
+    service: "foxmemory-store",
+    runtime: "node-ts",
+    mem0: "oss",
+    openaiBaseUrl: OPENAI_BASE_URL || null,
+    llmModel: LLM_MODEL,
+    embedModel: EMBED_MODEL
+  });
 });
 
 const addSchema = z.object({
@@ -106,7 +121,7 @@ app.delete("/v1/memories/:id", async (req, res) => {
   res.json({ ok: true, id: req.params.id });
 });
 
-// Back-compat aliases used by earlier scaffold
+// Back-compat aliases
 app.post("/memory.write", async (req, res) => {
   const text = String(req.body?.text ?? "");
   const user_id = req.body?.user_id as string | undefined;
