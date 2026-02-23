@@ -41,3 +41,17 @@ npm start
 - `MEM0_EMBED_MODEL` (optional)
 - `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_API_KEY` / `QDRANT_COLLECTION` (optional)
 - `MEM0_HISTORY_DB_PATH` (optional)
+
+
+## Embedded Qdrant mode
+This image now bundles Qdrant and starts it automatically inside the same container.
+
+Default behavior:
+- Qdrant listens on `127.0.0.1:6333` inside the container
+- Store API listens on `0.0.0.0:8082`
+
+Useful env vars:
+- `QDRANT_STORAGE_PATH` (default `/qdrant/storage`)
+- `QDRANT_HTTP_PORT` (default `6333`)
+
+Note: bundling both processes in one container is convenient for single-node deployments, but split services are still recommended for production scale and isolation.
