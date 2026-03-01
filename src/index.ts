@@ -9,8 +9,23 @@ const PORT = Number(process.env.PORT || 8082);
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
+const HAS_OPENAI_API_KEY = Boolean(process.env.OPENAI_API_KEY);
 const LLM_MODEL = process.env.MEM0_LLM_MODEL || "gpt-4.1-nano";
 const EMBED_MODEL = process.env.MEM0_EMBED_MODEL || "text-embedding-3-small";
+
+function sanitizeBaseUrl(url?: string) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const cleanPath = parsed.pathname.replace(/\/$/, "") || "/";
+    return `${parsed.protocol}//${parsed.host}${cleanPath}`;
+  } catch {
+    return "invalid";
+  }
+}
+
+const AUTH_MODE = HAS_OPENAI_API_KEY ? "api_key" : "local-default";
+const OPENAI_BASE_URL_SANITIZED = sanitizeBaseUrl(OPENAI_BASE_URL);
 
 const memory = new Memory({
   version: "v1.1",
@@ -52,9 +67,13 @@ app.get("/health", (_req, res) => {
     service: "foxmemory-store",
     runtime: "node-ts",
     mem0: "oss",
-    openaiBaseUrl: OPENAI_BASE_URL || null,
     llmModel: LLM_MODEL,
-    embedModel: EMBED_MODEL
+    embedModel: EMBED_MODEL,
+    diagnostics: {
+      authMode: AUTH_MODE,
+      openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
+      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED
+    }
   });
 });
 
@@ -141,4 +160,21 @@ app.post("/memory.search", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`foxmemory-store listening on :${PORT}`);
+  console.log(
+    "foxmemory-store diagnostics",
+    JSON.stringify(
+      {
+        authMode: AUTH_MODE,
+        openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
+        openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+        llmModel: LLM_MODEL,
+        embedModel: EMBED_MODEL,
+        qdrantHost: process.env.QDRANT_HOST || null,
+        qdrantPort: process.env.QDRANT_PORT ? Number(process.env.QDRANT_PORT) : null,
+        qdrantCollection: process.env.QDRANT_COLLECTION || "foxmemory"
+      },
+      null,
+      0
+    )
+  );
 });
