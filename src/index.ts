@@ -61,6 +61,36 @@ const memory = new Memory({
     : {})
 });
 
+const requireScopeSchema = z
+  .object({
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  });
+
+const writeAliasSchema = z
+  .object({
+    text: z.string().trim().min(1),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  });
+
+const searchAliasSchema = z
+  .object({
+    query: z.string().trim().min(1),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    limit: z.coerce.number().int().positive().max(100).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  });
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -77,46 +107,62 @@ app.get("/health", (_req, res) => {
   });
 });
 
-const addSchema = z.object({
-  messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
-  user_id: z.string().optional(),
-  run_id: z.string().optional(),
-  metadata: z.record(z.unknown()).optional()
-});
+const addSchema = z
+  .object({
+    messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  });
 
 app.post("/v1/memories", async (req, res) => {
-  const parsed = addSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const parsed = addSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const body = parsed.data;
-  const result = await memory.add(body.messages, {
-    userId: body.user_id,
-    runId: body.run_id,
-    metadata: body.metadata,
-    output_format: "v1.1"
-  } as any);
+    const body = parsed.data;
+    const result = await memory.add(body.messages, {
+      userId: body.user_id,
+      runId: body.run_id,
+      metadata: body.metadata,
+      output_format: "v1.1"
+    } as any);
 
-  res.json(result);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
 });
 
-const searchSchema = z.object({
-  query: z.string().min(1),
-  user_id: z.string().optional(),
-  run_id: z.string().optional(),
-  top_k: z.number().int().positive().max(100).optional()
-});
+const searchSchema = z
+  .object({
+    query: z.string().trim().min(1),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    top_k: z.number().int().positive().max(100).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  });
 
 app.post("/v1/memories/search", async (req, res) => {
-  const parsed = searchSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const parsed = searchSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const body = parsed.data;
-  const result = await memory.search(body.query, {
-    userId: body.user_id,
-    runId: body.run_id,
-    limit: body.top_k
-  } as any);
-  res.json(result);
+    const body = parsed.data;
+    const result = await memory.search(body.query, {
+      userId: body.user_id,
+      runId: body.run_id,
+      limit: body.top_k
+    } as any);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
 });
 
 app.get("/v1/memories/:id", async (req, res) => {
@@ -129,33 +175,63 @@ app.get("/v1/memories/:id", async (req, res) => {
 });
 
 app.get("/v1/memories", async (req, res) => {
-  const userId = req.query.user_id as string | undefined;
-  const runId = req.query.run_id as string | undefined;
-  const result = await memory.getAll({ userId, runId } as any);
-  res.json(result);
+  try {
+    const parsed = requireScopeSchema.safeParse({
+      user_id: req.query.user_id,
+      run_id: req.query.run_id
+    });
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const userId = parsed.data.user_id as string | undefined;
+    const runId = parsed.data.run_id as string | undefined;
+    const result = await memory.getAll({ userId, runId } as any);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
 });
 
 app.delete("/v1/memories/:id", async (req, res) => {
-  await memory.delete(req.params.id);
-  res.json({ ok: true, id: req.params.id });
+  try {
+    await memory.delete(req.params.id);
+    res.json({ ok: true, id: req.params.id });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
 });
 
 // Back-compat aliases
 app.post("/memory.write", async (req, res) => {
-  const text = String(req.body?.text ?? "");
-  const user_id = req.body?.user_id as string | undefined;
-  const run_id = req.body?.run_id as string | undefined;
-  const result = await memory.add([{ role: "user", content: text }], { userId: user_id, runId: run_id } as any);
-  res.json({ ok: true, result });
+  try {
+    const parsed = writeAliasSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const { text, user_id, run_id } = parsed.data;
+    const result = await memory.add([{ role: "user", content: text }], {
+      userId: user_id,
+      runId: run_id
+    } as any);
+    res.json({ ok: true, result });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
 });
 
 app.post("/memory.search", async (req, res) => {
-  const query = String(req.body?.query ?? "");
-  const user_id = req.body?.user_id as string | undefined;
-  const run_id = req.body?.run_id as string | undefined;
-  const limit = Number(req.body?.limit ?? 5);
-  const result = await memory.search(query, { userId: user_id, runId: run_id, limit } as any);
-  res.json({ ok: true, ...result });
+  try {
+    const parsed = searchAliasSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const { query, user_id, run_id, limit } = parsed.data;
+    const result = await memory.search(query, {
+      userId: user_id,
+      runId: run_id,
+      limit: limit ?? 5
+    } as any);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
 });
 
 app.listen(PORT, () => {
