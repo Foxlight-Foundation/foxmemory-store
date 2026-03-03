@@ -80,6 +80,17 @@ const writeAliasSchema = z
     message: "One of user_id or run_id is required"
   });
 
+const rawWriteSchema = z
+  .object({
+    text: z.string().trim().min(1),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  });
+
 const searchAliasSchema = z
   .object({
     query: z.string().trim().min(1),
@@ -244,6 +255,25 @@ app.post("/memory.search", async (req, res) => {
       limit: limit ?? 5
     } as any);
     res.json({ ok: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
+});
+
+// Deterministic ingest lane: bypass LLM fact extraction (infer=false)
+app.post("/memory.raw_write", async (req, res) => {
+  try {
+    const parsed = rawWriteSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const { text, user_id, run_id, metadata } = parsed.data;
+    const result = await memory.add([{ role: "user", content: text }], {
+      userId: user_id,
+      runId: run_id,
+      metadata,
+      infer: false
+    } as any);
+    res.json({ ok: true, deterministic: true, result });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
   }
