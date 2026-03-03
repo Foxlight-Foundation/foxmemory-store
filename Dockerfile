@@ -5,6 +5,8 @@ RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 
 # Node app build
+# sqlite3 may require local compilation when prebuild download is unavailable.
+RUN apk add --no-cache python3 make g++
 COPY package.json ./
 RUN npm install --omit=dev
 COPY tsconfig.json ./
