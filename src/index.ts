@@ -91,6 +91,22 @@ const searchAliasSchema = z
     message: "One of user_id or run_id is required"
   });
 
+const ADD_RETRIES = Number(process.env.MEM0_ADD_RETRIES || 3);
+const ADD_RETRY_DELAY_MS = Number(process.env.MEM0_ADD_RETRY_DELAY_MS || 250);
+
+async function addWithRetries(
+  messages: Array<{ role: string; content: string }>,
+  opts: { userId?: string; runId?: string; metadata?: Record<string, unknown> }
+) {
+  let last: any = { results: [] };
+  for (let attempt = 1; attempt <= Math.max(1, ADD_RETRIES); attempt++) {
+    last = await memory.add(messages, { ...opts, output_format: "v1.1" } as any);
+    if (Array.isArray(last?.results) && last.results.length > 0) return last;
+    if (attempt < ADD_RETRIES) await new Promise((r) => setTimeout(r, ADD_RETRY_DELAY_MS));
+  }
+  return last;
+}
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -124,12 +140,11 @@ app.post("/v1/memories", async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const body = parsed.data;
-    const result = await memory.add(body.messages, {
+    const result = await addWithRetries(body.messages, {
       userId: body.user_id,
       runId: body.run_id,
-      metadata: body.metadata,
-      output_format: "v1.1"
-    } as any);
+      metadata: body.metadata
+    });
 
     res.json(result);
   } catch (err: any) {
@@ -207,10 +222,10 @@ app.post("/memory.write", async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const { text, user_id, run_id } = parsed.data;
-    const result = await memory.add([{ role: "user", content: text }], {
+    const result = await addWithRetries([{ role: "user", content: text }], {
       userId: user_id,
       runId: run_id
-    } as any);
+    });
     res.json({ ok: true, result });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
