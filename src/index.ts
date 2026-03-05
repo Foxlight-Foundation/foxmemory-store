@@ -396,6 +396,35 @@ const v2ListSchema = z
     message: "One of user_id/run_id/filters is required unless scope=all"
   });
 
+type IdempotencyRecord = {
+  fingerprint: string;
+  status: number;
+  responseBody: unknown;
+  createdAt: number;
+};
+
+const IDEM_TTL_MS = Math.max(60_000, Number(process.env.IDEMPOTENCY_TTL_MS || 24 * 60 * 60 * 1000));
+const idempotencyStore = new Map<string, IdempotencyRecord>();
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableJson(v)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(",")}}`;
+}
+
+function v2MutationFingerprint(routeKey: string, body: unknown): string {
+  return `${routeKey}:${stableJson(body)}`;
+}
+
+function pruneIdempotencyStore(now = Date.now()) {
+  for (const [key, row] of idempotencyStore.entries()) {
+    if (now - row.createdAt > IDEM_TTL_MS) idempotencyStore.delete(key);
+  }
+}
+
 function extractIdsFromFilters(filters: Record<string, unknown> | undefined): { user_id?: string; run_id?: string; orPairs?: Array<{user_id?: string; run_id?: string}> } {
   if (!filters || typeof filters !== 'object') return {};
   const out: any = {};
