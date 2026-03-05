@@ -28,14 +28,16 @@ JSON
 
 echo "[1/3] initial write"
 resp1=$(curl -sS -X POST "${BASE_URL}/v2/memory.write" -H 'Content-Type: application/json' -d "${payload_a}")
-echo "$resp1" | jq . >/dev/null
+canon1=$(echo "$resp1" | jq -S -c .)
 
-echo "[2/3] replay same key+payload (expect same response)"
+echo "[2/3] replay same key+payload (expect semantic-equivalent response)"
 resp2=$(curl -sS -X POST "${BASE_URL}/v2/memory.write" -H 'Content-Type: application/json' -d "${payload_a}")
-echo "$resp2" | jq . >/dev/null
+canon2=$(echo "$resp2" | jq -S -c .)
 
-if [[ "$resp1" != "$resp2" ]]; then
+if [[ "$canon1" != "$canon2" ]]; then
   echo "FAIL: replay payload mismatch"
+  echo "first:  $canon1"
+  echo "second: $canon2"
   exit 1
 fi
 
