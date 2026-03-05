@@ -6,7 +6,12 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 8082);
-const SERVICE_VERSION = process.env.SERVICE_VERSION || process.env.GIT_SHA || "unknown";
+const SERVICE_VERSION =
+  process.env.HEALTH_VERSION ||
+  process.env.SERVICE_VERSION ||
+  process.env.IMAGE_DIGEST ||
+  process.env.GIT_SHA ||
+  "unknown";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
@@ -36,7 +41,7 @@ const memory = new Memory({
     config: {
       apiKey: OPENAI_API_KEY,
       model: LLM_MODEL,
-      ...(OPENAI_BASE_URL ? { openaiBaseUrl: OPENAI_BASE_URL } : {})
+      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
     }
   },
   embedder: {
@@ -44,7 +49,7 @@ const memory = new Memory({
     config: {
       apiKey: OPENAI_API_KEY,
       model: EMBED_MODEL,
-      ...(OPENAI_BASE_URL ? { openaiBaseUrl: OPENAI_BASE_URL } : {})
+      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
     }
   },
   ...(process.env.QDRANT_HOST
