@@ -7,14 +7,22 @@ EXPECTED_DIGEST="${EXPECTED_DIGEST:-}"
 
 echo "[info] ssh_target=${SSH_TARGET} container=${CONTAINER}"
 
-digest=$(ssh "${SSH_TARGET}" "docker inspect --format='{{index .RepoDigests 0}}' '${CONTAINER}'" 2>/dev/null || true)
-if [[ -z "${digest}" ]]; then
-  echo "BLOCKED: unable to resolve repo digest for container '${CONTAINER}' on '${SSH_TARGET}'"
-  echo "hint: ensure container name is correct and runtime has digest-pinned image metadata"
+inspect=$(ssh "${SSH_TARGET}" "docker inspect --format='{{index .RepoDigests 0}}|{{.Image}}' '${CONTAINER}'" 2>/dev/null || true)
+digest="${inspect%%|*}"
+image_id="${inspect#*|}"
+if [[ -z "${digest}" || "${digest}" == "<no value>" ]]; then
+  echo "BLOCKED: no repo digest for container '${CONTAINER}' on '${SSH_TARGET}'"
+  echo "hint: container appears tag-based; redeploy with digest-pinned image for provenance certainty"
+  if [[ -n "${image_id}" && "${image_id}" != "${inspect}" ]]; then
+    echo "live_image_id=${image_id}"
+  fi
   exit 2
 fi
 
 echo "live_digest=${digest}"
+if [[ -n "${image_id}" && "${image_id}" != "${inspect}" ]]; then
+  echo "live_image_id=${image_id}"
+fi
 
 if [[ -n "${EXPECTED_DIGEST}" ]]; then
   if [[ "${digest}" != *"${EXPECTED_DIGEST}"* ]]; then
