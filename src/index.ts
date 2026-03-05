@@ -6,6 +6,7 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 8082);
+const SERVICE_VERSION = process.env.SERVICE_VERSION || process.env.GIT_SHA || "unknown";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
@@ -173,6 +174,7 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: "foxmemory-store",
     runtime: "node-ts",
+    version: SERVICE_VERSION,
     mem0: "oss",
     llmModel: LLM_MODEL,
     embedModel: EMBED_MODEL,
@@ -498,9 +500,14 @@ function v2Ok(res: any, data: any, meta?: Record<string, unknown>) {
 }
 
 function v2Err(res: any, status: number, code: string, message: string, details?: unknown) {
+  const problemType = `https://docs.openclaw.ai/problems/${String(code || "INTERNAL_ERROR").toLowerCase()}`;
   return res.status(status).json({
-    ok: false,
-    error: { code, message, ...(details ? { details } : {}) }
+    type: problemType,
+    title: code,
+    status,
+    detail: message,
+    ...(details ? { errors: details } : {}),
+    ok: false
   });
 }
 
