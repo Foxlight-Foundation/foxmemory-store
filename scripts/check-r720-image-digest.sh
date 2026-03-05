@@ -2,12 +2,27 @@
 set -euo pipefail
 
 SSH_TARGET="${SSH_TARGET:-r720-vm}"
-CONTAINER="${CONTAINER:-foxmemory_v2-store-1}"
+CONTAINER="${CONTAINER:-}"
 EXPECTED_DIGEST="${EXPECTED_DIGEST:-}"
+
+if [[ -z "${CONTAINER}" ]]; then
+  CONTAINER=$(ssh "${SSH_TARGET}" "docker ps --format '{{.Names}}' | egrep 'foxmemory.*store|store' | head -n1" 2>/dev/null || true)
+fi
+
+if [[ -z "${CONTAINER}" ]]; then
+  echo "BLOCKED: could not auto-detect foxmemory store container on '${SSH_TARGET}'"
+  echo "hint: set CONTAINER=<name> explicitly"
+  exit 2
+fi
 
 echo "[info] ssh_target=${SSH_TARGET} container=${CONTAINER}"
 
 inspect=$(ssh "${SSH_TARGET}" "docker inspect --format='{{index .RepoDigests 0}}|{{.Image}}' '${CONTAINER}'" 2>/dev/null || true)
+if [[ -z "${inspect}" || "${inspect}" == "${CONTAINER}" ]]; then
+  echo "BLOCKED: container '${CONTAINER}' not found on '${SSH_TARGET}'"
+  exit 2
+fi
+
 digest="${inspect%%|*}"
 image_id="${inspect#*|}"
 if [[ -z "${digest}" || "${digest}" == "<no value>" ]]; then
