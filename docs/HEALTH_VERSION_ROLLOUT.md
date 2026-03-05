@@ -22,6 +22,7 @@ Expose immutable runtime build identity at `GET /health.version` so replay/readi
 4. Recreate container on R720.
 5. Verify:
    - `curl -fsS http://<r720-host>:8082/health.version | jq .`
+   - `curl -fsS http://<r720-host>:8082/health.version | jq -e '.version and .build and .build.imageDigest' >/dev/null`
    - `bash scripts/check-r720-image-digest.sh` (from workspace with `SSH_TARGET` set)
 6. Run replay readiness gate:
    - `BASE_URL=http://<r720-host>:8082 SSH_TARGET=<r720-ssh> bash scripts/gate-v2-replay-readiness.sh`
