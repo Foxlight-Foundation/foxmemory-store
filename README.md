@@ -23,7 +23,7 @@ Most AI apps are stateless by default. This service adds long-term memory so you
 3. Embeddings + memory records are stored in Qdrant
 4. Search returns relevant memory snippets
 
-See also: `docs/ARCHITECTURE.md` and `docs/API_CONTRACT.md`.
+See also: `docs/ARCHITECTURE.md` and `docs/API_CONTRACT.md` (full exhaustive endpoint contract).
 
 ---
 
@@ -75,7 +75,19 @@ curl -s http://localhost:8082/health | jq .
 
 ## API endpoints
 
-- `GET /health`
+Primary (v2):
+
+- `POST /v2/memory.write`
+- `POST /v2/memories`
+- `POST /v2/memories/search`
+- `GET /v2/memories`
+- `POST /v2/memories/list`
+- `GET /v2/memories/:id`
+- `PUT /v2/memories/:id`
+- `DELETE /v2/memories/:id`
+
+Compatibility (v1):
+
 - `POST /v1/memories`
 - `POST /v1/memories/search`
 - `GET /v1/memories/:id`
@@ -86,8 +98,9 @@ Back-compat aliases:
 
 - `POST /memory.write`
 - `POST /memory.search`
+- `POST /memory.raw_write`
 
-Detailed request/response examples: `docs/API_CONTRACT.md`
+Detailed request/response contract: `docs/API_CONTRACT.md`
 
 ---
 
