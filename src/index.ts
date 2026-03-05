@@ -99,7 +99,8 @@ const v2WriteSchema = z
     run_id: z.string().trim().min(1).optional(),
     metadata: z.record(z.unknown()).optional(),
     infer_preferred: z.boolean().optional(),
-    fallback_raw: z.boolean().optional()
+    fallback_raw: z.boolean().optional(),
+    idempotency_key: z.string().trim().min(1).max(255).optional()
   })
   .refine((v) => Boolean(v.user_id || v.run_id), {
     message: "One of user_id or run_id is required"
@@ -357,10 +358,10 @@ app.post("/memory.raw_write", async (req, res) => {
 
 // V2 contract: normalized envelope + explicit scope ergonomics.
 const v2FilterSchema = z.record(z.unknown()).optional();
-
 const v2UpdateSchema = z.object({
   text: z.string().trim().min(1),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.unknown()).optional(),
+  idempotency_key: z.string().trim().min(1).max(255).optional()
 });
 
 const v2SearchSchema = z
@@ -426,7 +427,11 @@ function pruneIdempotencyStore(now = Date.now()) {
 }
 
 function getIdempotencyKey(req: any): string | null {
-  const raw = req?.header?.("Idempotency-Key") || req?.header?.("idempotency-key") || req?.headers?.["idempotency-key"];
+  const raw =
+    req?.header?.("Idempotency-Key") ||
+    req?.header?.("idempotency-key") ||
+    req?.headers?.["idempotency-key"] ||
+    req?.body?.idempotency_key;
   if (typeof raw !== "string") return null;
   const key = raw.trim();
   return key.length ? key : null;
