@@ -296,76 +296,216 @@ app.post("/memory.raw_write", async (req, res) => {
   }
 });
 
-// V2 infer-first lane with deterministic fallback.
+// V2 contract: normalized envelope + explicit scope ergonomics.
+const v2SearchSchema = z
+  .object({
+    query: z.string().trim().min(1),
+    scope: z.enum(["session", "long-term", "all"]).optional(),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    top_k: z.coerce.number().int().positive().max(100).optional(),
+    threshold: z.coerce.number().min(0).max(1).optional(),
+    keyword_search: z.boolean().optional(),
+    reranking: z.boolean().optional(),
+    source: z.string().trim().min(1).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id || v.scope === "all"), {
+    message: "One of user_id/run_id is required unless scope=all"
+  });
+
+const v2ListSchema = z
+  .object({
+    scope: z.enum(["session", "long-term", "all"]).optional(),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    page_size: z.coerce.number().int().positive().max(500).optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id || v.scope === "all"), {
+    message: "One of user_id/run_id is required unless scope=all"
+  });
+
+function v2Ok(res: any, data: any, meta?: Record<string, unknown>) {
+  return res.json({ ok: true, data, ...(meta ? { meta } : {}) });
+}
+
+function v2Err(res: any, status: number, code: string, message: string, details?: unknown) {
+  return res.status(status).json({
+    ok: false,
+    error: { code, message, ...(details ? { details } : {}) }
+  });
+}
+
+function resolveScopeIds(input: { scope?: "session" | "long-term" | "all"; user_id?: string; run_id?: string }) {
+  if (input.scope === "session") return { user_id: undefined, run_id: input.run_id };
+  if (input.scope === "long-term") return { user_id: input.user_id, run_id: undefined };
+  return { user_id: input.user_id, run_id: input.run_id };
+}
+
+async function v2Write(body: z.infer<typeof v2WriteSchema>) {
+  const userId = body.user_id;
+  const runId = body.run_id;
+  const metadata = body.metadata;
+  const inferPreferred = body.infer_preferred !== false;
+  const fallbackRaw = body.fallback_raw !== false;
+  const messages = body.messages?.length
+    ? body.messages
+    : [{ role: "user", content: String(body.text || "") }];
+
+  let inferResult: any = { results: [] };
+  let rawResult: any = null;
+
+  if (inferPreferred) {
+    inferResult = await addWithRetries(messages, {
+      userId,
+      runId,
+      metadata
+    });
+    if (Array.isArray(inferResult?.results) && inferResult.results.length > 0) {
+      return {
+        mode: "inferred",
+        attempts: ADD_RETRIES,
+        infer: { resultCount: inferResult.results.length },
+        result: inferResult
+      };
+    }
+  }
+
+  if (!fallbackRaw) {
+    return {
+      mode: "none",
+      attempts: inferPreferred ? ADD_RETRIES : 0,
+      infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
+      result: inferResult
+    };
+  }
+
+  const rawText = body.text?.trim()
+    ? body.text
+    : messages
+        .map((m) => `${m.role}: ${m.content}`)
+        .join("\n")
+        .slice(0, 4000);
+
+  rawResult = await memory.add([{ role: "user", content: rawText }], {
+    userId,
+    runId,
+    metadata,
+    infer: false
+  } as any);
+
+  return {
+    mode: "fallback_raw",
+    attempts: inferPreferred ? ADD_RETRIES : 0,
+    infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
+    fallback: { resultCount: Array.isArray(rawResult?.results) ? rawResult.results.length : 0 },
+    result: rawResult
+  };
+}
+
 app.post("/v2/memory.write", async (req, res) => {
   try {
     const parsed = v2WriteSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+    const out = await v2Write(parsed.data);
+    return v2Ok(res, out);
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+app.post("/v2/memories", async (req, res) => {
+  try {
+    const parsed = v2WriteSchema.safeParse(req.body);
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+    const out = await v2Write(parsed.data);
+    return v2Ok(res, out);
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+app.post("/v2/memories/search", async (req, res) => {
+  try {
+    const parsed = v2SearchSchema.safeParse(req.body);
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
 
     const body = parsed.data;
-    const userId = body.user_id;
-    const runId = body.run_id;
-    const metadata = body.metadata;
-    const inferPreferred = body.infer_preferred !== false;
-    const fallbackRaw = body.fallback_raw !== false;
-    const messages = body.messages?.length
-      ? body.messages
-      : [{ role: "user", content: String(body.text || "") }];
+    const ids = resolveScopeIds(body);
+    const limit = body.top_k ?? 5;
 
-    let inferResult: any = { results: [] };
-    let rawResult: any = null;
+    const runSearch = async (query: string, user_id?: string, run_id?: string) =>
+      memory.search(query, {
+        userId: user_id,
+        runId: run_id,
+        limit,
+        threshold: body.threshold,
+        keyword_search: body.keyword_search,
+        reranking: body.reranking,
+        source: body.source
+      } as any);
 
-    if (inferPreferred) {
-      inferResult = await addWithRetries(messages, {
-        userId,
-        runId,
-        metadata
-      });
-      if (Array.isArray(inferResult?.results) && inferResult.results.length > 0) {
-        return res.json({
-          ok: true,
-          mode: "inferred",
-          attempts: ADD_RETRIES,
-          infer: { resultCount: inferResult.results.length },
-          result: inferResult
-        });
-      }
+    if (body.scope === "all" && !body.user_id && !body.run_id) {
+      return v2Ok(res, { results: [] }, { scope: "all", count: 0 });
     }
 
-    if (!fallbackRaw) {
-      return res.json({
-        ok: true,
-        mode: "none",
-        attempts: inferPreferred ? ADD_RETRIES : 0,
-        infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
-        result: inferResult
-      });
+    if (body.scope === "all" && body.user_id && body.run_id) {
+      const [a, b] = await Promise.all([
+        runSearch(body.query, body.user_id, undefined),
+        runSearch(body.query, undefined, body.run_id)
+      ]);
+      const merged = [...(a?.results || []), ...(b?.results || [])];
+      const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values()).slice(0, limit);
+      return v2Ok(res, { results: dedup }, { scope: "all", count: dedup.length });
     }
 
-    const rawText = body.text?.trim()
-      ? body.text
-      : messages
-          .map((m) => `${m.role}: ${m.content}`)
-          .join("\n")
-          .slice(0, 4000);
-
-    rawResult = await memory.add([{ role: "user", content: rawText }], {
-      userId,
-      runId,
-      metadata,
-      infer: false
-    } as any);
-
-    return res.json({
-      ok: true,
-      mode: "fallback_raw",
-      attempts: inferPreferred ? ADD_RETRIES : 0,
-      infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
-      fallback: { resultCount: Array.isArray(rawResult?.results) ? rawResult.results.length : 0 },
-      result: rawResult
-    });
+    const result = await runSearch(body.query, ids.user_id, ids.run_id);
+    return v2Ok(res, { results: result?.results || [] }, { scope: body.scope || "direct", count: (result?.results || []).length });
   } catch (err: any) {
-    res.status(500).json({ error: String(err?.message || err) });
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+app.get("/v2/memories", async (req, res) => {
+  try {
+    const parsed = v2ListSchema.safeParse(req.query);
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+
+    const q = parsed.data;
+    const ids = resolveScopeIds(q);
+
+    if (q.scope === "all" && q.user_id && q.run_id) {
+      const [a, b] = await Promise.all([
+        memory.getAll({ userId: q.user_id } as any),
+        memory.getAll({ runId: q.run_id } as any)
+      ]);
+      const merged = [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])];
+      const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values());
+      return v2Ok(res, dedup.slice(0, q.page_size || dedup.length), { scope: "all", count: dedup.length });
+    }
+
+    const rows = await memory.getAll({ userId: ids.user_id, runId: ids.run_id } as any);
+    const list = Array.isArray(rows) ? rows : [];
+    return v2Ok(res, list.slice(0, q.page_size || list.length), { scope: q.scope || "direct", count: list.length });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+app.get("/v2/memories/:id", async (req, res) => {
+  try {
+    const row = await memory.get(req.params.id);
+    return v2Ok(res, row);
+  } catch (err: any) {
+    return v2Err(res, 404, "NOT_FOUND", String(err?.message || err));
+  }
+});
+
+app.delete("/v2/memories/:id", async (req, res) => {
+  try {
+    await memory.delete(req.params.id);
+    return v2Ok(res, { id: req.params.id, deleted: true });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
 });
 
