@@ -507,7 +507,6 @@ app.post("/v2/memory.write", async (req, res) => {
     const parsed = v2WriteSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
     runtimeStats.requests.add += 1;
-    runtimeStats.requests.add += 1;
     const out = await v2Write(parsed.data);
     return v2Ok(res, out);
   } catch (err: any) {
@@ -573,7 +572,6 @@ app.get("/v2/memories", async (req, res) => {
     const parsed = v2ListSchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
-    runtimeStats.requests.list += 1;
     runtimeStats.requests.list += 1;
     const q = parsed.data;
     const ids = resolveScopeIds(q);
