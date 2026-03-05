@@ -119,6 +119,38 @@ const searchAliasSchema = z
     message: "One of user_id or run_id is required"
   });
 
+
+
+type RuntimeStats = {
+  startedAt: string;
+  writesByMode: { infer: number; raw: number };
+  memoryEvents: { ADD: number; UPDATE: number; DELETE: number; NONE: number };
+  requests: { add: number; search: number; list: number; get: number; delete: number; update: number };
+};
+
+const runtimeStats: RuntimeStats = {
+  startedAt: new Date().toISOString(),
+  writesByMode: { infer: 0, raw: 0 },
+  memoryEvents: { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 },
+  requests: { add: 0, search: 0, list: 0, get: 0, delete: 0, update: 0 },
+};
+
+function trackAddResult(mode: "infer" | "raw", result: any) {
+  runtimeStats.writesByMode[mode] += 1;
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  if (!rows.length) {
+    runtimeStats.memoryEvents.NONE += 1;
+    return;
+  }
+  for (const r of rows) {
+    const ev = String(r?.event || '').toUpperCase();
+    if (ev === 'ADD') runtimeStats.memoryEvents.ADD += 1;
+    else if (ev === 'UPDATE') runtimeStats.memoryEvents.UPDATE += 1;
+    else if (ev === 'DELETE') runtimeStats.memoryEvents.DELETE += 1;
+    else runtimeStats.memoryEvents.NONE += 1;
+  }
+}
+
 const ADD_RETRIES = Number(process.env.MEM0_ADD_RETRIES || 3);
 const ADD_RETRY_DELAY_MS = Number(process.env.MEM0_ADD_RETRY_DELAY_MS || 250);
 
@@ -151,6 +183,21 @@ app.get("/health", (_req, res) => {
   });
 });
 
+
+app.get("/stats", (_req, res) => {
+  const started = Date.parse(runtimeStats.startedAt);
+  const uptimeSec = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : null;
+  res.json({
+    ok: true,
+    startedAt: runtimeStats.startedAt,
+    uptimeSec,
+    writesByMode: runtimeStats.writesByMode,
+    memoryEvents: runtimeStats.memoryEvents,
+    requests: runtimeStats.requests,
+    ingestionQueueDepth: null,
+  });
+});
+
 const addSchema = z
   .object({
     messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
@@ -167,13 +214,16 @@ app.post("/v1/memories", async (req, res) => {
     const parsed = addSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
+    runtimeStats.requests.search += 1;
     const body = parsed.data;
+    runtimeStats.requests.add += 1;
     const result = await addWithRetries(body.messages, {
       userId: body.user_id,
       runId: body.run_id,
       metadata: body.metadata
     });
 
+    trackAddResult("infer", result);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
@@ -197,6 +247,7 @@ app.post("/v1/memories/search", async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const body = parsed.data;
+    runtimeStats.requests.search += 1;
     const result = await memory.search(body.query, {
       userId: body.user_id,
       runId: body.run_id,
@@ -210,6 +261,7 @@ app.post("/v1/memories/search", async (req, res) => {
 
 app.get("/v1/memories/:id", async (req, res) => {
   try {
+    runtimeStats.requests.get += 1;
     const result = await memory.get(req.params.id);
     res.json(result);
   } catch (err) {
@@ -227,6 +279,7 @@ app.get("/v1/memories", async (req, res) => {
 
     const userId = parsed.data.user_id as string | undefined;
     const runId = parsed.data.run_id as string | undefined;
+    runtimeStats.requests.list += 1;
     const result = await memory.getAll({ userId, runId } as any);
     res.json(result);
   } catch (err: any) {
@@ -236,6 +289,7 @@ app.get("/v1/memories", async (req, res) => {
 
 app.delete("/v1/memories/:id", async (req, res) => {
   try {
+    runtimeStats.requests.delete += 1;
     await memory.delete(req.params.id);
     res.json({ ok: true, id: req.params.id });
   } catch (err: any) {
@@ -250,10 +304,12 @@ app.post("/memory.write", async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const { text, user_id, run_id } = parsed.data;
+    runtimeStats.requests.add += 1;
     const result = await addWithRetries([{ role: "user", content: text }], {
       userId: user_id,
       runId: run_id
     });
+    trackAddResult("infer", result);
     res.json({ ok: true, result });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
@@ -266,6 +322,7 @@ app.post("/memory.search", async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const { query, user_id, run_id, limit } = parsed.data;
+    runtimeStats.requests.search += 1;
     const result = await memory.search(query, {
       userId: user_id,
       runId: run_id,
@@ -284,12 +341,14 @@ app.post("/memory.raw_write", async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const { text, user_id, run_id, metadata } = parsed.data;
+    runtimeStats.requests.add += 1;
     const result = await memory.add([{ role: "user", content: text }], {
       userId: user_id,
       runId: run_id,
       metadata,
       infer: false
     } as any);
+    trackAddResult("raw", result);
     res.json({ ok: true, deterministic: true, result });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
@@ -398,6 +457,7 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
       metadata
     });
     if (Array.isArray(inferResult?.results) && inferResult.results.length > 0) {
+      trackAddResult("infer", inferResult);
       return {
         mode: "inferred",
         attempts: ADD_RETRIES,
@@ -408,6 +468,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
   }
 
   if (!fallbackRaw) {
+    runtimeStats.writesByMode.infer += 1;
+    runtimeStats.memoryEvents.NONE += 1;
     return {
       mode: "none",
       attempts: inferPreferred ? ADD_RETRIES : 0,
@@ -430,6 +492,7 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
     infer: false
   } as any);
 
+  trackAddResult("raw", rawResult);
   return {
     mode: "fallback_raw",
     attempts: inferPreferred ? ADD_RETRIES : 0,
@@ -443,6 +506,8 @@ app.post("/v2/memory.write", async (req, res) => {
   try {
     const parsed = v2WriteSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+    runtimeStats.requests.add += 1;
+    runtimeStats.requests.add += 1;
     const out = await v2Write(parsed.data);
     return v2Ok(res, out);
   } catch (err: any) {
@@ -508,6 +573,8 @@ app.get("/v2/memories", async (req, res) => {
     const parsed = v2ListSchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
+    runtimeStats.requests.list += 1;
+    runtimeStats.requests.list += 1;
     const q = parsed.data;
     const ids = resolveScopeIds(q);
 
@@ -558,6 +625,7 @@ app.post("/v2/memories/list", async (req, res) => {
 
 app.get("/v2/memories/:id", async (req, res) => {
   try {
+    runtimeStats.requests.get += 1;
     const row = await memory.get(req.params.id);
     return v2Ok(res, row);
   } catch (err: any) {
@@ -567,6 +635,7 @@ app.get("/v2/memories/:id", async (req, res) => {
 
 app.put("/v2/memories/:id", async (req, res) => {
   try {
+    runtimeStats.requests.update += 1;
     const parsed = v2UpdateSchema.safeParse(req.body || {});
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
     await memory.get(req.params.id);
@@ -582,6 +651,7 @@ app.put("/v2/memories/:id", async (req, res) => {
 
 app.delete("/v2/memories/:id", async (req, res) => {
   try {
+    runtimeStats.requests.delete += 1;
     await memory.get(req.params.id);
     await memory.delete(req.params.id);
     return v2Ok(res, { id: req.params.id, deleted: true });
