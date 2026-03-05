@@ -91,6 +91,23 @@ const rawWriteSchema = z
     message: "One of user_id or run_id is required"
   });
 
+const v2WriteSchema = z
+  .object({
+    text: z.string().trim().min(1).optional(),
+    messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1).optional(),
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    metadata: z.record(z.unknown()).optional(),
+    infer_preferred: z.boolean().optional(),
+    fallback_raw: z.boolean().optional()
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required"
+  })
+  .refine((v) => Boolean(v.text || (v.messages && v.messages.length)), {
+    message: "Either text or messages is required"
+  });
+
 const searchAliasSchema = z
   .object({
     query: z.string().trim().min(1),
@@ -274,6 +291,79 @@ app.post("/memory.raw_write", async (req, res) => {
       infer: false
     } as any);
     res.json({ ok: true, deterministic: true, result });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
+});
+
+// V2 infer-first lane with deterministic fallback.
+app.post("/v2/memory.write", async (req, res) => {
+  try {
+    const parsed = v2WriteSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const body = parsed.data;
+    const userId = body.user_id;
+    const runId = body.run_id;
+    const metadata = body.metadata;
+    const inferPreferred = body.infer_preferred !== false;
+    const fallbackRaw = body.fallback_raw !== false;
+    const messages = body.messages?.length
+      ? body.messages
+      : [{ role: "user", content: String(body.text || "") }];
+
+    let inferResult: any = { results: [] };
+    let rawResult: any = null;
+
+    if (inferPreferred) {
+      inferResult = await addWithRetries(messages, {
+        userId,
+        runId,
+        metadata
+      });
+      if (Array.isArray(inferResult?.results) && inferResult.results.length > 0) {
+        return res.json({
+          ok: true,
+          mode: "inferred",
+          attempts: ADD_RETRIES,
+          infer: { resultCount: inferResult.results.length },
+          result: inferResult
+        });
+      }
+    }
+
+    if (!fallbackRaw) {
+      return res.json({
+        ok: true,
+        mode: "none",
+        attempts: inferPreferred ? ADD_RETRIES : 0,
+        infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
+        result: inferResult
+      });
+    }
+
+    const rawText = body.text?.trim()
+      ? body.text
+      : messages
+          .map((m) => `${m.role}: ${m.content}`)
+          .join("\n")
+          .slice(0, 4000);
+
+    rawResult = await memory.add([{ role: "user", content: rawText }], {
+      userId,
+      runId,
+      metadata,
+      infer: false
+    } as any);
+
+    return res.json({
+      ok: true,
+      mode: "fallback_raw",
+      attempts: inferPreferred ? ADD_RETRIES : 0,
+      infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
+      fallback: { resultCount: Array.isArray(rawResult?.results) ? rawResult.results.length : 0 },
+      result: rawResult
+    });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
   }
