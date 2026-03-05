@@ -17,25 +17,26 @@ fi
 
 echo "[info] ssh_target=${SSH_TARGET} container=${CONTAINER}"
 
-inspect=$(ssh "${SSH_TARGET}" "docker inspect --format='{{index .RepoDigests 0}}|{{.Image}}' '${CONTAINER}'" 2>/dev/null || true)
-if [[ -z "${inspect}" || "${inspect}" == "${CONTAINER}" ]]; then
+inspect_json=$(ssh "${SSH_TARGET}" "docker inspect '${CONTAINER}'" 2>/dev/null || true)
+if [[ -z "${inspect_json}" || "${inspect_json}" == "[]" ]]; then
   echo "BLOCKED: container '${CONTAINER}' not found on '${SSH_TARGET}'"
   exit 2
 fi
 
-digest="${inspect%%|*}"
-image_id="${inspect#*|}"
+digest=$(echo "${inspect_json}" | jq -r '.[0].RepoDigests[0] // empty')
+image_id=$(echo "${inspect_json}" | jq -r '.[0].Image // empty')
+
 if [[ -z "${digest}" || "${digest}" == "<no value>" ]]; then
   echo "BLOCKED: no repo digest for container '${CONTAINER}' on '${SSH_TARGET}'"
   echo "hint: container appears tag-based; redeploy with digest-pinned image for provenance certainty"
-  if [[ -n "${image_id}" && "${image_id}" != "${inspect}" ]]; then
+  if [[ -n "${image_id}" ]]; then
     echo "live_image_id=${image_id}"
   fi
   exit 2
 fi
 
 echo "live_digest=${digest}"
-if [[ -n "${image_id}" && "${image_id}" != "${inspect}" ]]; then
+if [[ -n "${image_id}" ]]; then
   echo "live_image_id=${image_id}"
 fi
 
