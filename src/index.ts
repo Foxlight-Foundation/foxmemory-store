@@ -425,6 +425,45 @@ function pruneIdempotencyStore(now = Date.now()) {
   }
 }
 
+function getIdempotencyKey(req: any): string | null {
+  const raw = req?.header?.("Idempotency-Key") || req?.header?.("idempotency-key") || req?.headers?.["idempotency-key"];
+  if (typeof raw !== "string") return null;
+  const key = raw.trim();
+  return key.length ? key : null;
+}
+
+function idempotencyPrecheck(req: any, routeKey: string, payload: unknown):
+  | { type: "none" }
+  | { type: "replay"; status: number; body: unknown }
+  | { type: "conflict"; message: string }
+  | { type: "fresh"; key: string; fingerprint: string } {
+  pruneIdempotencyStore();
+  const key = getIdempotencyKey(req);
+  if (!key) return { type: "none" };
+
+  const fingerprint = v2MutationFingerprint(routeKey, payload);
+  const existing = idempotencyStore.get(key);
+  if (!existing) return { type: "fresh", key, fingerprint };
+
+  if (existing.fingerprint !== fingerprint) {
+    return {
+      type: "conflict",
+      message: "Idempotency key reuse with different request parameters"
+    };
+  }
+
+  return { type: "replay", status: existing.status, body: existing.responseBody };
+}
+
+function idempotencyPersist(key: string, fingerprint: string, status: number, body: unknown) {
+  idempotencyStore.set(key, {
+    fingerprint,
+    status,
+    responseBody: body,
+    createdAt: Date.now()
+  });
+}
+
 function extractIdsFromFilters(filters: Record<string, unknown> | undefined): { user_id?: string; run_id?: string; orPairs?: Array<{user_id?: string; run_id?: string}> } {
   if (!filters || typeof filters !== 'object') return {};
   const out: any = {};
@@ -535,9 +574,17 @@ app.post("/v2/memory.write", async (req, res) => {
   try {
     const parsed = v2WriteSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+
+    const idem = idempotencyPrecheck(req, "POST:/v2/memory.write", parsed.data);
+    if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
+    if (idem.type === "replay") return res.status(idem.status).json(idem.body);
+
     runtimeStats.requests.add += 1;
     const out = await v2Write(parsed.data);
-    return v2Ok(res, out);
+    const body = { ok: true, data: out };
+    const status = 200;
+    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
+    return res.status(status).json(body);
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
@@ -547,8 +594,17 @@ app.post("/v2/memories", async (req, res) => {
   try {
     const parsed = v2WriteSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+
+    const idem = idempotencyPrecheck(req, "POST:/v2/memories", parsed.data);
+    if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
+    if (idem.type === "replay") return res.status(idem.status).json(idem.body);
+
+    runtimeStats.requests.add += 1;
     const out = await v2Write(parsed.data);
-    return v2Ok(res, out);
+    const body = { ok: true, data: out };
+    const status = 200;
+    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
+    return res.status(status).json(body);
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
@@ -662,12 +718,20 @@ app.get("/v2/memories/:id", async (req, res) => {
 
 app.put("/v2/memories/:id", async (req, res) => {
   try {
-    runtimeStats.requests.update += 1;
     const parsed = v2UpdateSchema.safeParse(req.body || {});
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+
+    const idem = idempotencyPrecheck(req, `PUT:/v2/memories/${req.params.id}`, parsed.data);
+    if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
+    if (idem.type === "replay") return res.status(idem.status).json(idem.body);
+
+    runtimeStats.requests.update += 1;
     await memory.get(req.params.id);
     const updated = await (memory as any).update(req.params.id, parsed.data.text, parsed.data.metadata ? { metadata: parsed.data.metadata } : undefined);
-    return v2Ok(res, updated || { id: req.params.id, text: parsed.data.text });
+    const body = { ok: true, data: updated || { id: req.params.id, text: parsed.data.text } };
+    const status = 200;
+    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
+    return res.status(status).json(body);
   } catch (err: any) {
     if (String(err?.message || err).toLowerCase().includes('not found') || String(err).includes('404') || String(err).includes('Bad Request')) {
       return v2Err(res, 404, "NOT_FOUND", String(err?.message || err));
@@ -678,10 +742,18 @@ app.put("/v2/memories/:id", async (req, res) => {
 
 app.delete("/v2/memories/:id", async (req, res) => {
   try {
+    const payload = { id: req.params.id };
+    const idem = idempotencyPrecheck(req, `DELETE:/v2/memories/${req.params.id}`, payload);
+    if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
+    if (idem.type === "replay") return res.status(idem.status).json(idem.body);
+
     runtimeStats.requests.delete += 1;
     await memory.get(req.params.id);
     await memory.delete(req.params.id);
-    return v2Ok(res, { id: req.params.id, deleted: true });
+    const body = { ok: true, data: { id: req.params.id, deleted: true } };
+    const status = 200;
+    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
+    return res.status(status).json(body);
   } catch (err: any) {
     if (String(err?.message || err).toLowerCase().includes('not found') || String(err).includes('404') || String(err).includes('Bad Request')) {
       return v2Err(res, 404, "NOT_FOUND", String(err?.message || err));
