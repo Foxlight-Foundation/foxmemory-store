@@ -297,20 +297,30 @@ app.post("/memory.raw_write", async (req, res) => {
 });
 
 // V2 contract: normalized envelope + explicit scope ergonomics.
+const v2FilterSchema = z.record(z.unknown()).optional();
+
+const v2UpdateSchema = z.object({
+  text: z.string().trim().min(1),
+  metadata: z.record(z.unknown()).optional()
+});
+
 const v2SearchSchema = z
   .object({
     query: z.string().trim().min(1),
     scope: z.enum(["session", "long-term", "all"]).optional(),
     user_id: z.string().trim().min(1).optional(),
     run_id: z.string().trim().min(1).optional(),
+    filters: v2FilterSchema,
     top_k: z.coerce.number().int().positive().max(100).optional(),
     threshold: z.coerce.number().min(0).max(1).optional(),
     keyword_search: z.boolean().optional(),
     reranking: z.boolean().optional(),
+    rerank: z.boolean().optional(),
+    fields: z.array(z.string()).optional(),
     source: z.string().trim().min(1).optional()
   })
-  .refine((v) => Boolean(v.user_id || v.run_id || v.scope === "all"), {
-    message: "One of user_id/run_id is required unless scope=all"
+  .refine((v) => Boolean(v.user_id || v.run_id || v.scope === "all" || v.filters), {
+    message: "One of user_id/run_id/filters is required unless scope=all"
   });
 
 const v2ListSchema = z
@@ -318,11 +328,38 @@ const v2ListSchema = z
     scope: z.enum(["session", "long-term", "all"]).optional(),
     user_id: z.string().trim().min(1).optional(),
     run_id: z.string().trim().min(1).optional(),
-    page_size: z.coerce.number().int().positive().max(500).optional()
+    filters: v2FilterSchema,
+    page: z.coerce.number().int().positive().optional(),
+    page_size: z.coerce.number().int().positive().max(500).optional(),
+    fields: z.array(z.string()).optional()
   })
-  .refine((v) => Boolean(v.user_id || v.run_id || v.scope === "all"), {
-    message: "One of user_id/run_id is required unless scope=all"
+  .refine((v) => Boolean(v.user_id || v.run_id || v.scope === "all" || v.filters), {
+    message: "One of user_id/run_id/filters is required unless scope=all"
   });
+
+function extractIdsFromFilters(filters: Record<string, unknown> | undefined): { user_id?: string; run_id?: string; orPairs?: Array<{user_id?: string; run_id?: string}> } {
+  if (!filters || typeof filters !== 'object') return {};
+  const out: any = {};
+  const f: any = filters;
+  if (typeof f.user_id === 'string' && f.user_id.trim()) out.user_id = f.user_id.trim();
+  if (typeof f.run_id === 'string' && f.run_id.trim()) out.run_id = f.run_id.trim();
+  if (Array.isArray(f.OR)) {
+    const pairs = f.OR
+      .map((x: any) => ({
+        user_id: typeof x?.user_id === 'string' ? x.user_id : undefined,
+        run_id: typeof x?.run_id === 'string' ? x.run_id : undefined
+      }))
+      .filter((x: any) => x.user_id || x.run_id);
+    if (pairs.length) out.orPairs = pairs;
+  }
+  if (Array.isArray(f.AND)) {
+    for (const x of f.AND) {
+      if (!out.user_id && typeof x?.user_id === 'string') out.user_id = x.user_id;
+      if (!out.run_id && typeof x?.run_id === 'string') out.run_id = x.run_id;
+    }
+  }
+  return out;
+}
 
 function v2Ok(res: any, data: any, meta?: Record<string, unknown>) {
   return res.json({ ok: true, data, ...(meta ? { meta } : {}) });
@@ -430,7 +467,8 @@ app.post("/v2/memories/search", async (req, res) => {
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
 
     const body = parsed.data;
-    const ids = resolveScopeIds(body);
+    const fids = extractIdsFromFilters((body.filters as any) || undefined);
+    const ids = resolveScopeIds({ ...body, user_id: body.user_id || fids.user_id, run_id: body.run_id || fids.run_id });
     const limit = body.top_k ?? 5;
 
     const runSearch = async (query: string, user_id?: string, run_id?: string) =>
@@ -440,7 +478,7 @@ app.post("/v2/memories/search", async (req, res) => {
         limit,
         threshold: body.threshold,
         keyword_search: body.keyword_search,
-        reranking: body.reranking,
+        reranking: body.reranking ?? body.rerank,
         source: body.source
       } as any);
 
@@ -491,6 +529,33 @@ app.get("/v2/memories", async (req, res) => {
   }
 });
 
+
+app.post("/v2/memories/list", async (req, res) => {
+  try {
+    const parsed = v2ListSchema.safeParse(req.body || {});
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+
+    const q = parsed.data;
+    const fids = extractIdsFromFilters((q.filters as any) || undefined);
+    const ids = resolveScopeIds({ ...q, user_id: q.user_id || fids.user_id, run_id: q.run_id || fids.run_id });
+
+    if (q.scope === "all" && fids.orPairs?.length) {
+      const buckets = await Promise.all(
+        fids.orPairs.map((p) => memory.getAll({ userId: p.user_id, runId: p.run_id } as any))
+      );
+      const merged = buckets.flatMap((b: any) => (Array.isArray(b) ? b : []));
+      const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values());
+      return v2Ok(res, dedup.slice(0, q.page_size || dedup.length), { scope: "all", count: dedup.length });
+    }
+
+    const rows = await memory.getAll({ userId: ids.user_id, runId: ids.run_id } as any);
+    const list = Array.isArray(rows) ? rows : [];
+    return v2Ok(res, list.slice(0, q.page_size || list.length), { scope: q.scope || "direct", count: list.length });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
 app.get("/v2/memories/:id", async (req, res) => {
   try {
     const row = await memory.get(req.params.id);
@@ -500,11 +565,30 @@ app.get("/v2/memories/:id", async (req, res) => {
   }
 });
 
+app.put("/v2/memories/:id", async (req, res) => {
+  try {
+    const parsed = v2UpdateSchema.safeParse(req.body || {});
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+    await memory.get(req.params.id);
+    const updated = await (memory as any).update(req.params.id, parsed.data.text, parsed.data.metadata ? { metadata: parsed.data.metadata } : undefined);
+    return v2Ok(res, updated || { id: req.params.id, text: parsed.data.text });
+  } catch (err: any) {
+    if (String(err?.message || err).toLowerCase().includes('not found') || String(err).includes('404') || String(err).includes('Bad Request')) {
+      return v2Err(res, 404, "NOT_FOUND", String(err?.message || err));
+    }
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
 app.delete("/v2/memories/:id", async (req, res) => {
   try {
+    await memory.get(req.params.id);
     await memory.delete(req.params.id);
     return v2Ok(res, { id: req.params.id, deleted: true });
   } catch (err: any) {
+    if (String(err?.message || err).toLowerCase().includes('not found') || String(err).includes('404') || String(err).includes('Bad Request')) {
+      return v2Err(res, 404, "NOT_FOUND", String(err?.message || err));
+    }
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
 });
