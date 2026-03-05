@@ -12,6 +12,9 @@ const SERVICE_VERSION =
   process.env.IMAGE_DIGEST ||
   process.env.GIT_SHA ||
   "unknown";
+const BUILD_COMMIT = process.env.GIT_SHA || process.env.BUILD_COMMIT || "unknown";
+const BUILD_IMAGE_DIGEST = process.env.IMAGE_DIGEST || "unknown";
+const BUILD_TIME = process.env.BUILD_TIME || "unknown";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
@@ -180,6 +183,11 @@ app.get("/health", (_req, res) => {
     service: "foxmemory-store",
     runtime: "node-ts",
     version: SERVICE_VERSION,
+    build: {
+      commit: BUILD_COMMIT,
+      imageDigest: BUILD_IMAGE_DIGEST,
+      time: BUILD_TIME
+    },
     mem0: "oss",
     llmModel: LLM_MODEL,
     embedModel: EMBED_MODEL,
@@ -187,6 +195,18 @@ app.get("/health", (_req, res) => {
       authMode: AUTH_MODE,
       openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
       openaiBaseUrl: OPENAI_BASE_URL_SANITIZED
+    }
+  });
+});
+
+app.get("/health.version", (_req, res) => {
+  res.json({
+    ok: true,
+    version: SERVICE_VERSION,
+    build: {
+      commit: BUILD_COMMIT,
+      imageDigest: BUILD_IMAGE_DIGEST,
+      time: BUILD_TIME
     }
   });
 });
