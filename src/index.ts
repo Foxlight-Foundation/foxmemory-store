@@ -1452,7 +1452,7 @@ const V2_OPENAPI_SPEC = {
       },
     },
     "/config/prompt": {
-      get: { summary: "Get current Call 1 (fact extraction) prompt", operationId: "v2GetPrompt", responses: { "200": { description: "{ prompt: string|null, source: string, persisted: boolean }" } } },
+      get: { summary: "Get current Call 1 (fact extraction) prompt", operationId: "v2GetPrompt", responses: { "200": { description: "{ prompt: string|null, effective_prompt: string, source: string, persisted: boolean }" } } },
       put: {
         summary: "Set Call 1 (fact extraction) prompt — persisted across restarts",
         operationId: "v2SetPrompt",
@@ -1461,7 +1461,7 @@ const V2_OPENAPI_SPEC = {
       },
     },
     "/config/update-prompt": {
-      get: { summary: "Get current Call 2 (ADD/UPDATE/DELETE/NONE decision) prompt", operationId: "v2GetUpdatePrompt", responses: { "200": { description: "{ prompt: string|null, source: string, persisted: boolean }" } } },
+      get: { summary: "Get current Call 2 (ADD/UPDATE/DELETE/NONE decision) prompt", operationId: "v2GetUpdatePrompt", responses: { "200": { description: "{ prompt: string|null, effective_prompt: string, source: string, persisted: boolean }" } } },
       put: {
         summary: "Set Call 2 (update decision) prompt — persisted across restarts",
         operationId: "v2SetUpdatePrompt",

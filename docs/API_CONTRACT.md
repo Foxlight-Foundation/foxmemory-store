@@ -350,10 +350,11 @@ Runtime-editable LLM prompts for memory inference. Changes take effect immediate
 Returns the current Call 1 prompt (fact extraction — what memories to extract from the conversation).
 
 ```json
-{ "ok": true, "data": { "prompt": null, "source": "default", "persisted": true }, "meta": { "version": "v2" } }
+{ "ok": true, "data": { "prompt": null, "effective_prompt": "<full active prompt text>", "source": "default", "persisted": true }, "meta": { "version": "v2" } }
 ```
 
 - `prompt: null` means the mem0 default is active.
+- `effective_prompt`: always the full text of the prompt currently in use (custom or default).
 - `source`: `"default"` | `"env"` | `"db"`
 
 ### `PUT /v2/config/prompt`
@@ -373,7 +374,7 @@ Request body:
 Returns the current Call 2 prompt (update decision — which memories to ADD / UPDATE / DELETE / NONE).
 
 ```json
-{ "ok": true, "data": { "prompt": null, "source": "default", "persisted": true }, "meta": { "version": "v2" } }
+{ "ok": true, "data": { "prompt": null, "effective_prompt": "<full active prompt text>", "source": "default", "persisted": true }, "meta": { "version": "v2" } }
 ```
 
 ### `PUT /v2/config/update-prompt`
