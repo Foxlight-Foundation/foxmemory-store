@@ -619,7 +619,16 @@ app.post("/v2/memory.write", async (req, res) => {
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
     runtimeStats.requests.add += 1;
+    const t0 = Date.now();
     const out = await v2Write(parsed.data);
+    analyticsDb?.recordWriteResults({
+      results: out.result?.results || [],
+      user_id: parsed.data.user_id,
+      run_id: parsed.data.run_id,
+      inputChars: inputCharsFromBody(parsed.data),
+      latencyMs: Date.now() - t0,
+      inferMode: parsed.data.infer_preferred !== false,
+    });
     const body = { ok: true, data: out };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
@@ -639,7 +648,16 @@ app.post("/v2/memories", async (req, res) => {
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
     runtimeStats.requests.add += 1;
+    const t0 = Date.now();
     const out = await v2Write(parsed.data);
+    analyticsDb?.recordWriteResults({
+      results: out.result?.results || [],
+      user_id: parsed.data.user_id,
+      run_id: parsed.data.run_id,
+      inputChars: inputCharsFromBody(parsed.data),
+      latencyMs: Date.now() - t0,
+      inferMode: parsed.data.infer_preferred !== false,
+    });
     const body = { ok: true, data: out };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
@@ -675,17 +693,24 @@ app.post("/v2/memories/search", async (req, res) => {
     }
 
     if (body.scope === "all" && body.user_id && body.run_id) {
+      const t0 = Date.now();
       const [a, b] = await Promise.all([
         runSearch(body.query, body.user_id, undefined),
         runSearch(body.query, undefined, body.run_id)
       ]);
       const merged = [...(a?.results || []), ...(b?.results || [])];
       const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values()).slice(0, limit);
+      const topScore = dedup[0]?.score ?? dedup[0]?.similarity ?? undefined;
+      analyticsDb?.recordSearch({ user_id: body.user_id, run_id: body.run_id, queryChars: body.query.length, resultCount: dedup.length, topScore, latencyMs: Date.now() - t0 });
       return v2Ok(res, { results: dedup }, { scope: "all", count: dedup.length });
     }
 
+    const t0 = Date.now();
     const result = await runSearch(body.query, ids.user_id, ids.run_id);
-    return v2Ok(res, { results: result?.results || [] }, { scope: body.scope || "direct", count: (result?.results || []).length });
+    const results = result?.results || [];
+    const topScore = (results[0] as any)?.score ?? (results[0] as any)?.similarity ?? undefined;
+    analyticsDb?.recordSearch({ user_id: ids.user_id, run_id: ids.run_id, queryChars: body.query.length, resultCount: results.length, topScore, latencyMs: Date.now() - t0 });
+    return v2Ok(res, { results }, { scope: body.scope || "direct", count: results.length });
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
@@ -832,21 +857,211 @@ app.get("/v2/stats", (_req, res) => {
   }, { version: "v2" });
 });
 
-// ── history DB analytics ───────────────────────────────────────────────────
+// ── FoxAnalyticsDB — our own event log (SQLite, writable, persisted) ────────
+//
+// mem0's historyDbPath is not populated when using Qdrant as the vector store.
+// We instrument every write/search ourselves so we get:
+//   - ADD/UPDATE/DELETE/NONE counts with latency → noneRatePct surfaces model quality
+//   - per-day breakdown for bar charts
+//   - recent activity feed with extracted memory text
+//   - search result counts and top scores
+//
+// Requires FOXMEMORY_ANALYTICS_DB_PATH to be on a mounted volume for persistence.
 
-const HISTORY_DB_PATH = process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db";
+const ANALYTICS_DB_PATH = process.env.FOXMEMORY_ANALYTICS_DB_PATH || "/data/foxmemory-analytics.db";
 
-function queryHistoryDb<T>(fn: (db: DatabaseSync) => T): { data: T; error: null } | { data: null; error: string } {
-  let db: DatabaseSync | null = null;
-  try {
-    db = new DatabaseSync(HISTORY_DB_PATH);
-    db.exec("PRAGMA query_only = true");
-    return { data: fn(db), error: null };
-  } catch (e: any) {
-    return { data: null, error: String(e?.message ?? e) };
-  } finally {
-    try { db?.close(); } catch { /* ignore */ }
+class FoxAnalyticsDB {
+  private db: DatabaseSync;
+  ready = false;
+
+  constructor(path: string) {
+    this.db = new DatabaseSync(path);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS write_events (
+        id         TEXT PRIMARY KEY,
+        ts         TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        memory_id  TEXT,
+        user_id    TEXT,
+        run_id     TEXT,
+        input_chars INTEGER,
+        output_text TEXT,
+        llm_model  TEXT,
+        latency_ms INTEGER,
+        infer_mode INTEGER DEFAULT 1
+      );
+      CREATE INDEX IF NOT EXISTS idx_we_ts    ON write_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_we_event ON write_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_we_user  ON write_events(user_id);
+
+      CREATE TABLE IF NOT EXISTS search_events (
+        id           TEXT PRIMARY KEY,
+        ts           TEXT NOT NULL,
+        user_id      TEXT,
+        run_id       TEXT,
+        query_chars  INTEGER,
+        result_count INTEGER,
+        top_score    REAL,
+        latency_ms   INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_se_ts ON search_events(ts);
+    `);
+    this.ready = true;
   }
+
+  recordWriteResults(opts: {
+    results: any[];
+    user_id?: string;
+    run_id?: string;
+    inputChars: number;
+    latencyMs: number;
+    inferMode: boolean;
+  }) {
+    if (!this.ready) return;
+    const ts = new Date().toISOString();
+    const stmt = this.db.prepare(
+      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    // If mem0 returned no results, record a single NONE row
+    const rows = opts.results.length ? opts.results : [null];
+    for (const r of rows) {
+      const event = r ? String(r?.metadata?.event || r?.event || "NONE").toUpperCase() : "NONE";
+      const memText = r?.memory ? String(r.memory).slice(0, 500) : null;
+      try {
+        stmt.run(
+          crypto.randomUUID(), ts, event, r?.id ?? null,
+          opts.user_id ?? null, opts.run_id ?? null,
+          opts.inputChars, memText, LLM_MODEL,
+          opts.latencyMs, opts.inferMode ? 1 : 0
+        );
+      } catch { /* non-critical — never crash the request */ }
+    }
+  }
+
+  recordSearch(opts: {
+    user_id?: string;
+    run_id?: string;
+    queryChars: number;
+    resultCount: number;
+    topScore?: number;
+    latencyMs: number;
+  }) {
+    if (!this.ready) return;
+    try {
+      this.db.prepare(
+        `INSERT INTO search_events (id, ts, user_id, run_id, query_chars, result_count, top_score, latency_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        crypto.randomUUID(), new Date().toISOString(),
+        opts.user_id ?? null, opts.run_id ?? null,
+        opts.queryChars, opts.resultCount, opts.topScore ?? null, opts.latencyMs
+      );
+    } catch { /* non-critical */ }
+  }
+
+  getStats(days: number) {
+    if (!this.ready) return null;
+    try {
+      // All-time event counts
+      const eventRows = this.db.prepare(
+        `SELECT event_type, COUNT(*) as count FROM write_events GROUP BY event_type`
+      ).all() as Array<{ event_type: string; count: number }>;
+
+      const byEvent: Record<string, number> = { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 };
+      let total = 0;
+      for (const r of eventRows) {
+        byEvent[r.event_type] = (byEvent[r.event_type] ?? 0) + r.count;
+        total += r.count;
+      }
+      const noneRatePct = total > 0 ? Math.round((byEvent.NONE / total) * 100) : 0;
+
+      // Write latency summary
+      const latRow = this.db.prepare(
+        `SELECT AVG(latency_ms) as avg, MIN(latency_ms) as min, MAX(latency_ms) as max
+         FROM write_events WHERE latency_ms IS NOT NULL`
+      ).get() as any;
+
+      // By day — event counts + avg latency per day in window
+      const byDayRaw = this.db.prepare(`
+        SELECT date(ts) as date, event_type, COUNT(*) as count,
+               CAST(AVG(latency_ms) AS INTEGER) as avg_latency_ms
+        FROM write_events
+        WHERE ts >= datetime('now', '-' || ? || ' days')
+        GROUP BY date(ts), event_type
+        ORDER BY date(ts) ASC
+      `).all(days) as Array<{ date: string; event_type: string; count: number; avg_latency_ms: number | null }>;
+
+      const byDayMap = new Map<string, { date: string; ADD: number; UPDATE: number; DELETE: number; NONE: number; avgLatencyMs: number | null }>();
+      for (const r of byDayRaw) {
+        if (!byDayMap.has(r.date)) byDayMap.set(r.date, { date: r.date, ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0, avgLatencyMs: null });
+        const entry = byDayMap.get(r.date)!;
+        if (r.event_type in entry) (entry as any)[r.event_type] += r.count;
+        if (r.avg_latency_ms !== null) entry.avgLatencyMs = r.avg_latency_ms;
+      }
+
+      // Recent activity (last 20 write events, useful for activity feed)
+      const recent = this.db.prepare(`
+        SELECT ts, event_type, memory_id, user_id, run_id, output_text, latency_ms, infer_mode
+        FROM write_events ORDER BY ts DESC LIMIT 20
+      `).all() as any[];
+
+      // Search summary
+      const searchRow = this.db.prepare(`
+        SELECT COUNT(*) as total,
+               CAST(AVG(result_count) * 10 AS INTEGER) / 10.0 as avgResults,
+               CAST(AVG(top_score) * 1000 AS INTEGER) / 1000.0 as avgTopScore,
+               CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
+        FROM search_events
+      `).get() as any;
+
+      return {
+        summary: {
+          total,
+          byEvent,
+          noneRatePct,
+          writeLatency: {
+            avgMs: latRow?.avg ? Math.round(latRow.avg) : null,
+            minMs: latRow?.min ?? null,
+            maxMs: latRow?.max ?? null,
+          },
+          model: { llm: LLM_MODEL, embed: EMBED_MODEL },
+        },
+        byDay: Array.from(byDayMap.values()),
+        recentActivity: recent.map((r: any) => ({
+          ts: r.ts,
+          event: r.event_type,
+          memoryId: r.memory_id,
+          userId: r.user_id,
+          runId: r.run_id,
+          preview: r.output_text ? (r.output_text as string).slice(0, 100) : null,
+          latencyMs: r.latency_ms,
+          inferMode: r.infer_mode === 1,
+        })),
+        searches: {
+          total: searchRow?.total ?? 0,
+          avgResults: searchRow?.avgResults ?? null,
+          avgTopScore: searchRow?.avgTopScore ?? null,
+          avgLatencyMs: searchRow?.avgLatencyMs ?? null,
+        },
+      };
+    } catch (e) {
+      console.error("[analytics] getStats error:", e);
+      return null;
+    }
+  }
+}
+
+let analyticsDb: FoxAnalyticsDB | null = null;
+try {
+  analyticsDb = new FoxAnalyticsDB(ANALYTICS_DB_PATH);
+} catch (e) {
+  console.warn("[analytics] DB unavailable (set FOXMEMORY_ANALYTICS_DB_PATH to a writable path):", String(e));
+}
+
+// ── helper: compute input size (chars) from write body ──────────────────────
+function inputCharsFromBody(body: { text?: string; messages?: Array<{ content: string }> }) {
+  return (body.text?.length ?? 0) + (body.messages?.reduce((s, m) => s + m.content.length, 0) ?? 0);
 }
 
 const v2StatsMemoriesQuerySchema = z.object({
@@ -858,100 +1073,33 @@ app.get("/v2/stats/memories", (req, res) => {
   if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
   const { days } = parsed.data;
+  const now = new Date();
+  const from = new Date(now);
+  from.setDate(from.getDate() - days);
+  const window = { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
 
-  // Also discover DB tables for diagnostics
-  const tablesResult = queryHistoryDb((db) =>
-    (db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{ name: string }>).map(r => r.name)
-  );
+  const stats = analyticsDb?.getStats(days) ?? null;
 
-  const result = queryHistoryDb((db) => {
-    const summaryRow = db.prepare(`
-      SELECT
-        SUM(CASE WHEN event = 'ADD'    AND is_deleted = 0 THEN 1 ELSE 0 END) AS totalAdded,
-        SUM(CASE WHEN event = 'UPDATE' AND is_deleted = 0 THEN 1 ELSE 0 END) AS totalUpdated,
-        SUM(CASE WHEN event = 'DELETE' AND is_deleted = 0 THEN 1 ELSE 0 END) AS totalDeleted,
-        MIN(created_at) AS oldestEntry,
-        MAX(created_at) AS newestEntry
-      FROM history
-    `).get() as any;
-
-    const activeRow = db.prepare(`
-      SELECT COUNT(DISTINCT memory_id) AS activeCount
-      FROM history
-      WHERE event = 'ADD' AND is_deleted = 0
-        AND memory_id NOT IN (
-          SELECT DISTINCT memory_id FROM history
-          WHERE event = 'DELETE' AND is_deleted = 0
-        )
-    `).get() as any;
-
-    const byDayRows = db.prepare(`
-      SELECT date(created_at) AS date, event, COUNT(*) AS count
-      FROM history
-      WHERE is_deleted = 0
-        AND created_at >= datetime('now', '-' || ? || ' days')
-      GROUP BY date(created_at), event
-      ORDER BY date(created_at) ASC
-    `).all(days) as Array<{ date: string; event: string; count: number }>;
-
-    const byDayMap = new Map<string, { date: string; ADD: number; UPDATE: number; DELETE: number; total: number }>();
-    for (const row of byDayRows) {
-      if (!byDayMap.has(row.date)) byDayMap.set(row.date, { date: row.date, ADD: 0, UPDATE: 0, DELETE: 0, total: 0 });
-      const entry = byDayMap.get(row.date)!;
-      const evt = row.event as "ADD" | "UPDATE" | "DELETE";
-      if (evt in entry) entry[evt] += row.count;
-      entry.total += row.count;
-    }
-
-    const recentRows = db.prepare(`
-      SELECT event, memory_id AS memoryId, new_memory AS newMemory, old_memory AS oldMemory, created_at AS createdAt
-      FROM history
-      WHERE is_deleted = 0
-      ORDER BY created_at DESC
-      LIMIT 20
-    `).all() as Array<{ event: string; memoryId: string; newMemory: string | null; oldMemory: string | null; createdAt: string }>;
-
-    const now = new Date();
-    const from = new Date(now);
-    from.setDate(from.getDate() - days);
-
-    return {
-      summary: {
-        totalAdded: summaryRow?.totalAdded ?? 0,
-        totalUpdated: summaryRow?.totalUpdated ?? 0,
-        totalDeleted: summaryRow?.totalDeleted ?? 0,
-        activeCount: activeRow?.activeCount ?? 0,
-        oldestEntry: summaryRow?.oldestEntry ?? null,
-        newestEntry: summaryRow?.newestEntry ?? null,
-      },
-      byDay: Array.from(byDayMap.values()),
-      recentActivity: recentRows.map((r) => ({
-        event: r.event,
-        memoryId: r.memoryId,
-        preview: (r.newMemory || r.oldMemory || "").slice(0, 100) || null,
-        createdAt: r.createdAt,
-      })),
-      window: { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) },
-    };
-  });
-
-  const tables = tablesResult.data ?? [];
-  const _debug = { dbPath: HISTORY_DB_PATH, tables, dbError: result.error ?? tablesResult.error ?? null };
-
-  if (result.data === null) {
-    const now = new Date();
-    const from = new Date(now);
-    from.setDate(from.getDate() - days);
+  if (!stats) {
     return v2Ok(res, {
-      summary: { totalAdded: 0, totalUpdated: 0, totalDeleted: 0, activeCount: 0, oldestEntry: null, newestEntry: null },
+      summary: {
+        total: 0,
+        byEvent: { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 },
+        noneRatePct: 0,
+        writeLatency: { avgMs: null, minMs: null, maxMs: null },
+        model: { llm: LLM_MODEL, embed: EMBED_MODEL },
+      },
       byDay: [],
       recentActivity: [],
-      window: { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) },
-      _debug,
+      searches: { total: 0, avgResults: null, avgTopScore: null, avgLatencyMs: null },
+      _info: analyticsDb === null
+        ? "Analytics DB unavailable. Mount a volume and set FOXMEMORY_ANALYTICS_DB_PATH to a writable path."
+        : "No data yet — analytics accumulate as writes/searches occur.",
+      window,
     }, { version: "v2" });
   }
 
-  return v2Ok(res, { ...result.data, _debug }, { version: "v2" });
+  return v2Ok(res, { ...stats, window }, { version: "v2" });
 });
 
 // ── batch delete ───────────────────────────────────────────────────────────
