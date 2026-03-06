@@ -42,11 +42,17 @@ const OPENAI_BASE_URL_SANITIZED = sanitizeBaseUrl(OPENAI_BASE_URL);
 let currentCustomPrompt: string | null =
   process.env.MEM0_CUSTOM_PROMPT || null;
 
-function createMemory(customPrompt?: string | null) {
+// Runtime-configurable update decision prompt (Call 2). null = use mem0 default.
+// Set via PUT /v2/config/update-prompt. Recreates the Memory instance on change.
+let currentCustomUpdatePrompt: string | null =
+  process.env.MEM0_CUSTOM_UPDATE_PROMPT || null;
+
+function createMemory(customPrompt?: string | null, customUpdatePrompt?: string | null) {
   return new Memory({
     version: "v1.1",
     historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
     ...(customPrompt ? { customPrompt } : {}),
+    ...(customUpdatePrompt ? { customUpdatePrompt } : {}),
     llm: {
       provider: "openai",
       config: {
@@ -79,7 +85,7 @@ function createMemory(customPrompt?: string | null) {
   });
 }
 
-let memory = createMemory(currentCustomPrompt);
+let memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
 
 const requireScopeSchema = z
   .object({
@@ -877,12 +883,45 @@ app.put("/v2/config/prompt", (req, res) => {
   }
   const newPrompt = parsed.data.prompt;
   currentCustomPrompt = newPrompt;
-  memory = createMemory(currentCustomPrompt);
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
   analyticsDb?.setConfig("custom_prompt", newPrompt);
   console.log(`[config] custom prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to default"}`);
   return v2Ok(res, {
     prompt: currentCustomPrompt,
     source: currentCustomPrompt ? "api" : "default",
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+app.get("/v2/config/update-prompt", (_req, res) => {
+  const dbPrompt = analyticsDb?.getConfig("custom_update_prompt") ?? null;
+  const source = currentCustomUpdatePrompt
+    ? dbPrompt !== null
+      ? "persisted"
+      : process.env.MEM0_CUSTOM_UPDATE_PROMPT === currentCustomUpdatePrompt
+        ? "env"
+        : "api"
+    : "default";
+  return v2Ok(res, {
+    prompt: currentCustomUpdatePrompt,
+    source,
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+app.put("/v2/config/update-prompt", (req, res) => {
+  const parsed = v2PromptSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  }
+  const newPrompt = parsed.data.prompt;
+  currentCustomUpdatePrompt = newPrompt;
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
+  analyticsDb?.setConfig("custom_update_prompt", newPrompt);
+  console.log(`[config] custom update prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to default"}`);
+  return v2Ok(res, {
+    prompt: currentCustomUpdatePrompt,
+    source: currentCustomUpdatePrompt ? "api" : "default",
     persisted: analyticsDb?.ready ?? false,
   });
 });
@@ -1136,12 +1175,19 @@ class FoxAnalyticsDB {
 let analyticsDb: FoxAnalyticsDB | null = null;
 try {
   analyticsDb = new FoxAnalyticsDB(ANALYTICS_DB_PATH);
-  // Restore persisted custom prompt (DB wins over env if both present)
+  // Restore persisted prompts (DB wins over env if both present)
   const persisted = analyticsDb.getConfig("custom_prompt");
   if (persisted !== null) {
     currentCustomPrompt = persisted;
-    memory = createMemory(currentCustomPrompt);
     console.log("[config] restored custom prompt from DB");
+  }
+  const persistedUpdate = analyticsDb.getConfig("custom_update_prompt");
+  if (persistedUpdate !== null) {
+    currentCustomUpdatePrompt = persistedUpdate;
+    console.log("[config] restored custom update prompt from DB");
+  }
+  if (persisted !== null || persistedUpdate !== null) {
+    memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
   }
 } catch (e) {
   console.warn("[analytics] DB unavailable (set FOXMEMORY_ANALYTICS_DB_PATH to a writable path):", String(e));
