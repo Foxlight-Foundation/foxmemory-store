@@ -7,7 +7,8 @@ WORKDIR /app
 # Node app build
 # sqlite3 may require local compilation when prebuild download is unavailable.
 RUN apk add --no-cache python3 make g++
-COPY package.json .npmrc ./
+COPY package.json .npmrc tsconfig.json ./
+COPY src ./src
 RUN --mount=type=secret,id=npm_token \
     echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/npm_token)" >> .npmrc && \
     npm install && npm run build && npm prune --omit=dev && \
