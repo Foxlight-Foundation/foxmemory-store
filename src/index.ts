@@ -1374,6 +1374,24 @@ const V2_OPENAPI_SPEC = {
         responses: { "200": { description: "{ deleted: uuid[], count: number }" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
       },
     },
+    "/config/prompt": {
+      get: { summary: "Get current Call 1 (fact extraction) prompt", operationId: "v2GetPrompt", responses: { "200": { description: "{ prompt: string|null, source: string, persisted: boolean }" } } },
+      put: {
+        summary: "Set Call 1 (fact extraction) prompt — persisted across restarts",
+        operationId: "v2SetPrompt",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["prompt"], properties: { prompt: { type: "string", nullable: true } } } } } },
+        responses: { "200": { description: "Updated prompt" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/config/update-prompt": {
+      get: { summary: "Get current Call 2 (ADD/UPDATE/DELETE/NONE decision) prompt", operationId: "v2GetUpdatePrompt", responses: { "200": { description: "{ prompt: string|null, source: string, persisted: boolean }" } } },
+      put: {
+        summary: "Set Call 2 (update decision) prompt — persisted across restarts",
+        operationId: "v2SetUpdatePrompt",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["prompt"], properties: { prompt: { type: "string", nullable: true } } } } } },
+        responses: { "200": { description: "Updated prompt" }, "400": { description: "Validation error" } },
+      },
+    },
     "/memory.write": {
       post: {
         summary: "Add memories — alias for POST /memories",
