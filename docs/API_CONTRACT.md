@@ -341,7 +341,56 @@ Dashboard mapping:
 - `summary.byEvent` → summary totals card
 - `recentActivity` → activity feed / audit log
 
-## 2.9 OpenAPI Spec
+## 2.9 Prompt Config
+
+Runtime-editable LLM prompts for memory inference. Changes take effect immediately on the next `memory.add()` call. Persisted to SQLite — survives restarts.
+
+### `GET /v2/config/prompt`
+
+Returns the current Call 1 prompt (fact extraction — what memories to extract from the conversation).
+
+```json
+{ "ok": true, "data": { "prompt": null, "source": "default", "persisted": true }, "meta": { "version": "v2" } }
+```
+
+- `prompt: null` means the mem0 default is active.
+- `source`: `"default"` | `"env"` | `"db"`
+
+### `PUT /v2/config/prompt`
+
+Set or clear the Call 1 prompt.
+
+Request body:
+```json
+{ "prompt": "You are a memory extraction assistant. Extract concise factual memories..." }
+```
+
+- `prompt: null` resets to the mem0 default.
+- Returns the same shape as `GET /v2/config/prompt`.
+
+### `GET /v2/config/update-prompt`
+
+Returns the current Call 2 prompt (update decision — which memories to ADD / UPDATE / DELETE / NONE).
+
+```json
+{ "ok": true, "data": { "prompt": null, "source": "default", "persisted": true }, "meta": { "version": "v2" } }
+```
+
+### `PUT /v2/config/update-prompt`
+
+Set or clear the Call 2 prompt.
+
+Request body:
+```json
+{ "prompt": "You are a memory manager. Given existing memories and new facts, decide which to ADD, UPDATE, DELETE, or NONE..." }
+```
+
+- `prompt: null` resets to the mem0 default.
+- The static preamble is replaced; the dynamic section (existing memories + new facts + output format) is always appended automatically.
+
+---
+
+## 2.10 OpenAPI Spec
 
 ### `GET /v2/openapi.json`
 
