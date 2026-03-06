@@ -623,8 +623,6 @@ app.post("/v2/memory.write", async (req, res) => {
     const out = await v2Write(parsed.data);
     analyticsDb?.recordWriteResults({
       results: out.result?.results || [],
-      user_id: parsed.data.user_id,
-      run_id: parsed.data.run_id,
       inputChars: inputCharsFromBody(parsed.data),
       latencyMs: Date.now() - t0,
       inferMode: parsed.data.infer_preferred !== false,
@@ -652,8 +650,6 @@ app.post("/v2/memories", async (req, res) => {
     const out = await v2Write(parsed.data);
     analyticsDb?.recordWriteResults({
       results: out.result?.results || [],
-      user_id: parsed.data.user_id,
-      run_id: parsed.data.run_id,
       inputChars: inputCharsFromBody(parsed.data),
       latencyMs: Date.now() - t0,
       inferMode: parsed.data.infer_preferred !== false,
@@ -790,8 +786,16 @@ app.put("/v2/memories/:id", async (req, res) => {
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
     runtimeStats.requests.update += 1;
+    const t0 = Date.now();
     await memory.get(req.params.id);
     const updated = await (memory as any).update(req.params.id, parsed.data.text, parsed.data.metadata ? { metadata: parsed.data.metadata } : undefined);
+    runtimeStats.memoryEvents.UPDATE += 1;
+    analyticsDb?.recordWriteResults({
+      results: [{ id: req.params.id, event: "UPDATE", memory: parsed.data.text }],
+      inputChars: parsed.data.text.length,
+      latencyMs: Date.now() - t0,
+      inferMode: false,
+    });
     const body = { ok: true, data: updated || { id: req.params.id, text: parsed.data.text } };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
@@ -812,8 +816,16 @@ app.delete("/v2/memories/:id", async (req, res) => {
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
     runtimeStats.requests.delete += 1;
+    const t0 = Date.now();
     await memory.get(req.params.id);
     await memory.delete(req.params.id);
+    runtimeStats.memoryEvents.DELETE += 1;
+    analyticsDb?.recordWriteResults({
+      results: [{ id: req.params.id, event: "DELETE" }],
+      latencyMs: Date.now() - t0,
+      inputChars: 0,
+      inferMode: false,
+    });
     const body = { ok: true, data: { id: req.params.id, deleted: true } };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
