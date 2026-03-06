@@ -23,6 +23,15 @@ const HAS_OPENAI_API_KEY = Boolean(process.env.OPENAI_API_KEY);
 const LLM_MODEL = process.env.MEM0_LLM_MODEL || "gpt-4.1-nano";
 const EMBED_MODEL = process.env.MEM0_EMBED_MODEL || "text-embedding-3-small";
 
+// Graph memory (Neo4j). Enabled when NEO4J_URL + NEO4J_PASSWORD are set.
+// MEM0_GRAPH_LLM_MODEL lets you use a separate, more capable model for entity/relation extraction.
+// Recommended hosted: gpt-4o-mini. Recommended local: Qwen2.5-14B-Instruct or Mistral-Small-3.1-24B.
+const NEO4J_URL = process.env.NEO4J_URL || null;
+const NEO4J_USERNAME = process.env.NEO4J_USERNAME || "neo4j";
+const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || null;
+const GRAPH_LLM_MODEL = process.env.MEM0_GRAPH_LLM_MODEL || LLM_MODEL;
+const GRAPH_ENABLED = Boolean(NEO4J_URL && NEO4J_PASSWORD);
+
 function sanitizeBaseUrl(url?: string) {
   if (!url) return null;
   try {
@@ -156,7 +165,34 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
             }
           }
         }
-      : {})
+      : {}),
+    ...(GRAPH_ENABLED
+      ? {
+          enableGraph: true,
+          graphStore: {
+            provider: "neo4j",
+            config: {
+              url: NEO4J_URL!,
+              username: NEO4J_USERNAME,
+              password: NEO4J_PASSWORD!,
+            },
+            // Optional separate LLM for graph entity/relation extraction.
+            // Defaults to the main LLM_MODEL if MEM0_GRAPH_LLM_MODEL is not set.
+            ...(GRAPH_LLM_MODEL !== LLM_MODEL
+              ? {
+                  llm: {
+                    provider: "openai",
+                    config: {
+                      apiKey: OPENAI_API_KEY,
+                      model: GRAPH_LLM_MODEL,
+                      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {}),
+                    },
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
   });
 }
 
@@ -287,7 +323,10 @@ app.get("/health", (_req, res) => {
     diagnostics: {
       authMode: AUTH_MODE,
       openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
-      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED
+      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+      graphEnabled: GRAPH_ENABLED,
+      neo4jUrl: NEO4J_URL,
+      graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
     }
   });
 });
@@ -787,17 +826,19 @@ app.post("/v2/memories/search", async (req, res) => {
       ]);
       const merged = [...(a?.results || []), ...(b?.results || [])];
       const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values()).slice(0, limit);
+      const relations = [...(a?.relations || []), ...(b?.relations || [])];
       const topScore = dedup[0]?.score ?? dedup[0]?.similarity ?? undefined;
       analyticsDb?.recordSearch({ user_id: body.user_id, run_id: body.run_id, queryChars: body.query.length, resultCount: dedup.length, topScore, latencyMs: Date.now() - t0 });
-      return v2Ok(res, { results: dedup }, { scope: "all", count: dedup.length });
+      return v2Ok(res, { results: dedup, ...(GRAPH_ENABLED ? { relations } : {}) }, { scope: "all", count: dedup.length });
     }
 
     const t0 = Date.now();
     const result = await runSearch(body.query, ids.user_id, ids.run_id);
     const results = result?.results || [];
+    const relations = result?.relations || [];
     const topScore = (results[0] as any)?.score ?? (results[0] as any)?.similarity ?? undefined;
     analyticsDb?.recordSearch({ user_id: ids.user_id, run_id: ids.run_id, queryChars: body.query.length, resultCount: results.length, topScore, latencyMs: Date.now() - t0 });
-    return v2Ok(res, { results }, { scope: body.scope || "direct", count: results.length });
+    return v2Ok(res, { results, ...(GRAPH_ENABLED ? { relations } : {}) }, { scope: body.scope || "direct", count: results.length });
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
@@ -1018,6 +1059,9 @@ app.get("/v2/health", (_req, res) => {
       authMode: AUTH_MODE,
       openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
       openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+      graphEnabled: GRAPH_ENABLED,
+      neo4jUrl: NEO4J_URL,
+      graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
     },
   }, { version: "v2" });
 });
@@ -1501,7 +1545,10 @@ app.listen(PORT, () => {
         embedModel: EMBED_MODEL,
         qdrantHost: process.env.QDRANT_HOST || null,
         qdrantPort: process.env.QDRANT_PORT ? Number(process.env.QDRANT_PORT) : null,
-        qdrantCollection: process.env.QDRANT_COLLECTION || "foxmemory"
+        qdrantCollection: process.env.QDRANT_COLLECTION || "foxmemory",
+        graphEnabled: GRAPH_ENABLED,
+        neo4jUrl: NEO4J_URL,
+        graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
       },
       null,
       0

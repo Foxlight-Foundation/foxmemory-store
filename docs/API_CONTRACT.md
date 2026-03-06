@@ -173,10 +173,15 @@ Success:
 ```json
 {
   "ok": true,
-  "data": { "results": [] },
+  "data": {
+    "results": [],
+    "relations": [{ "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }]
+  },
   "meta": { "scope": "direct", "count": 0 }
 }
 ```
+
+- `relations` is only present when graph memory is enabled (`NEO4J_URL` configured). Each entry is a `{ source, relationship, destination }` triple.
 
 ## 2.3 List
 
@@ -505,6 +510,16 @@ Common v2 titles:
   - `MEM0_EMBED_MODEL`
 - Qdrant config:
   - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`
+- Graph memory (Neo4j — optional):
+  - `NEO4J_URL` — Bolt URL, e.g. `bolt://neo4j:7687`. Graph memory is **disabled** unless this is set.
+  - `NEO4J_USERNAME` — default: `neo4j`
+  - `NEO4J_PASSWORD` — required when `NEO4J_URL` is set
+  - `MEM0_GRAPH_LLM_MODEL` — optional separate model for entity/relation extraction. Defaults to `MEM0_LLM_MODEL`. Recommended: `gpt-4o-mini` (hosted) or `Qwen2.5-14B-Instruct` / `Mistral-Small-3.1` (local).
+
+When graph memory is enabled:
+- Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment).
+- `POST /v2/memories/search` responses include a `relations` array of `{ source, relationship, destination }` triples from the graph store alongside the vector `results`.
+- `GET /v2/health` diagnostics include `graphEnabled`, `neo4jUrl`, and `graphLlmModel`.
 
 Recommended production checks:
 1. `GET /health` or `GET /v2/health`
