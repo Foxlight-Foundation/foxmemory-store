@@ -1,6 +1,6 @@
 import express from "express";
 import { z } from "zod";
-import { Memory } from "mem0ai/oss";
+import { Memory } from "@foxlight-foundation/mem0ai/oss";
 import { DatabaseSync } from "node:sqlite";
 
 const app = express();
@@ -37,39 +37,49 @@ function sanitizeBaseUrl(url?: string) {
 const AUTH_MODE = HAS_OPENAI_API_KEY ? "api_key" : "local-default";
 const OPENAI_BASE_URL_SANITIZED = sanitizeBaseUrl(OPENAI_BASE_URL);
 
-const memory = new Memory({
-  version: "v1.1",
-  historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
-  llm: {
-    provider: "openai",
-    config: {
-      apiKey: OPENAI_API_KEY,
-      model: LLM_MODEL,
-      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
-    }
-  },
-  embedder: {
-    provider: "openai",
-    config: {
-      apiKey: OPENAI_API_KEY,
-      model: EMBED_MODEL,
-      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
-    }
-  },
-  ...(process.env.QDRANT_HOST
-    ? {
-        vectorStore: {
-          provider: "qdrant",
-          config: {
-            host: process.env.QDRANT_HOST,
-            port: Number(process.env.QDRANT_PORT || 6333),
-            apiKey: process.env.QDRANT_API_KEY,
-            collectionName: process.env.QDRANT_COLLECTION || "foxmemory"
+// Runtime-configurable extraction prompt (Call 1). null = use mem0 default.
+// Set via PUT /v2/config/prompt. Recreates the Memory instance on change.
+let currentCustomPrompt: string | null =
+  process.env.MEM0_CUSTOM_PROMPT || null;
+
+function createMemory(customPrompt?: string | null) {
+  return new Memory({
+    version: "v1.1",
+    historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
+    ...(customPrompt ? { customPrompt } : {}),
+    llm: {
+      provider: "openai",
+      config: {
+        apiKey: OPENAI_API_KEY,
+        model: LLM_MODEL,
+        ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
+      }
+    },
+    embedder: {
+      provider: "openai",
+      config: {
+        apiKey: OPENAI_API_KEY,
+        model: EMBED_MODEL,
+        ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
+      }
+    },
+    ...(process.env.QDRANT_HOST
+      ? {
+          vectorStore: {
+            provider: "qdrant",
+            config: {
+              host: process.env.QDRANT_HOST,
+              port: Number(process.env.QDRANT_PORT || 6333),
+              apiKey: process.env.QDRANT_API_KEY,
+              collectionName: process.env.QDRANT_COLLECTION || "foxmemory"
+            }
           }
         }
-      }
-    : {})
-});
+      : {})
+  });
+}
+
+let memory = createMemory(currentCustomPrompt);
 
 const requireScopeSchema = z
   .object({
@@ -838,6 +848,45 @@ app.delete("/v2/memories/:id", async (req, res) => {
   }
 });
 
+// ── v2 config (runtime tunables) ──────────────────────────────────────────
+
+app.get("/v2/config/prompt", (_req, res) => {
+  const dbPrompt = analyticsDb?.getConfig("custom_prompt") ?? null;
+  const source = currentCustomPrompt
+    ? dbPrompt !== null
+      ? "persisted"
+      : process.env.MEM0_CUSTOM_PROMPT === currentCustomPrompt
+        ? "env"
+        : "api"
+    : "default";
+  return v2Ok(res, {
+    prompt: currentCustomPrompt,
+    source,
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+const v2PromptSchema = z.object({
+  prompt: z.string().min(1).nullable(),
+});
+
+app.put("/v2/config/prompt", (req, res) => {
+  const parsed = v2PromptSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  }
+  const newPrompt = parsed.data.prompt;
+  currentCustomPrompt = newPrompt;
+  memory = createMemory(currentCustomPrompt);
+  analyticsDb?.setConfig("custom_prompt", newPrompt);
+  console.log(`[config] custom prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to default"}`);
+  return v2Ok(res, {
+    prompt: currentCustomPrompt,
+    source: currentCustomPrompt ? "api" : "default",
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
 // ── v2 observability & analytics ──────────────────────────────────────────
 
 app.get("/v2/health", (_req, res) => {
@@ -917,8 +966,28 @@ class FoxAnalyticsDB {
         latency_ms   INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_se_ts ON search_events(ts);
+
+      CREATE TABLE IF NOT EXISTS config (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     this.ready = true;
+  }
+
+  getConfig(key: string): string | null {
+    if (!this.ready) return null;
+    const row = this.db.prepare("SELECT value FROM config WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setConfig(key: string, value: string | null): void {
+    if (!this.ready) return;
+    if (value === null) {
+      this.db.prepare("DELETE FROM config WHERE key = ?").run(key);
+    } else {
+      this.db.prepare("INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+    }
   }
 
   recordWriteResults(opts: {
@@ -1067,6 +1136,13 @@ class FoxAnalyticsDB {
 let analyticsDb: FoxAnalyticsDB | null = null;
 try {
   analyticsDb = new FoxAnalyticsDB(ANALYTICS_DB_PATH);
+  // Restore persisted custom prompt (DB wins over env if both present)
+  const persisted = analyticsDb.getConfig("custom_prompt");
+  if (persisted !== null) {
+    currentCustomPrompt = persisted;
+    memory = createMemory(currentCustomPrompt);
+    console.log("[config] restored custom prompt from DB");
+  }
 } catch (e) {
   console.warn("[analytics] DB unavailable (set FOXMEMORY_ANALYTICS_DB_PATH to a writable path):", String(e));
 }

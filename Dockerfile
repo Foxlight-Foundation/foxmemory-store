@@ -7,11 +7,12 @@ WORKDIR /app
 # Node app build
 # sqlite3 may require local compilation when prebuild download is unavailable.
 RUN apk add --no-cache python3 make g++
-COPY package.json ./
-RUN npm install --omit=dev
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm install && npm run build && npm prune --omit=dev
+COPY package.json .npmrc ./
+RUN --mount=type=secret,id=npm_token \
+    echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/npm_token)" >> .npmrc && \
+    npm install && npm run build && npm prune --omit=dev && \
+    # Remove auth token from image
+    sed -i '/_authToken/d' .npmrc
 
 # Embedded qdrant binary
 COPY --from=qdrant /qdrant /qdrant
