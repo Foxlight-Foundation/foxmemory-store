@@ -1,6 +1,7 @@
 import express from "express";
 import { z } from "zod";
 import { Memory } from "mem0ai/oss";
+import { DatabaseSync } from "node:sqlite";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -797,6 +798,307 @@ app.delete("/v2/memories/:id", async (req, res) => {
     }
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
+});
+
+// ── v2 observability & analytics ──────────────────────────────────────────
+
+app.get("/v2/health", (_req, res) => {
+  return v2Ok(res, {
+    service: "foxmemory-store",
+    runtime: "node-ts",
+    mem0: "oss",
+    version: SERVICE_VERSION,
+    build: { commit: BUILD_COMMIT, imageDigest: BUILD_IMAGE_DIGEST, time: BUILD_TIME },
+    llmModel: LLM_MODEL,
+    embedModel: EMBED_MODEL,
+    diagnostics: {
+      authMode: AUTH_MODE,
+      openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
+      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+    },
+  }, { version: "v2" });
+});
+
+app.get("/v2/stats", (_req, res) => {
+  const started = Date.parse(runtimeStats.startedAt);
+  const uptimeSec = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : null;
+  return v2Ok(res, {
+    startedAt: runtimeStats.startedAt,
+    uptimeSec,
+    writesByMode: runtimeStats.writesByMode,
+    memoryEvents: runtimeStats.memoryEvents,
+    requests: runtimeStats.requests,
+  }, { version: "v2" });
+});
+
+// ── history DB analytics ───────────────────────────────────────────────────
+
+const HISTORY_DB_PATH = process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db";
+
+function queryHistoryDb<T>(fn: (db: DatabaseSync) => T): T | null {
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(HISTORY_DB_PATH);
+    db.exec("PRAGMA query_only = true");
+    return fn(db);
+  } catch {
+    return null;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
+const v2StatsMemoriesQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).optional().default(30),
+});
+
+app.get("/v2/stats/memories", (req, res) => {
+  const parsed = v2StatsMemoriesQuerySchema.safeParse(req.query);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+
+  const { days } = parsed.data;
+
+  const result = queryHistoryDb((db) => {
+    const summaryRow = db.prepare(`
+      SELECT
+        SUM(CASE WHEN event = 'ADD'    AND is_deleted = 0 THEN 1 ELSE 0 END) AS totalAdded,
+        SUM(CASE WHEN event = 'UPDATE' AND is_deleted = 0 THEN 1 ELSE 0 END) AS totalUpdated,
+        SUM(CASE WHEN event = 'DELETE' AND is_deleted = 0 THEN 1 ELSE 0 END) AS totalDeleted,
+        MIN(created_at) AS oldestEntry,
+        MAX(created_at) AS newestEntry
+      FROM history
+    `).get() as any;
+
+    const activeRow = db.prepare(`
+      SELECT COUNT(DISTINCT memory_id) AS activeCount
+      FROM history
+      WHERE event = 'ADD' AND is_deleted = 0
+        AND memory_id NOT IN (
+          SELECT DISTINCT memory_id FROM history
+          WHERE event = 'DELETE' AND is_deleted = 0
+        )
+    `).get() as any;
+
+    const byDayRows = db.prepare(`
+      SELECT date(created_at) AS date, event, COUNT(*) AS count
+      FROM history
+      WHERE is_deleted = 0
+        AND created_at >= datetime('now', '-' || ? || ' days')
+      GROUP BY date(created_at), event
+      ORDER BY date(created_at) ASC
+    `).all(days) as Array<{ date: string; event: string; count: number }>;
+
+    const byDayMap = new Map<string, { date: string; ADD: number; UPDATE: number; DELETE: number; total: number }>();
+    for (const row of byDayRows) {
+      if (!byDayMap.has(row.date)) byDayMap.set(row.date, { date: row.date, ADD: 0, UPDATE: 0, DELETE: 0, total: 0 });
+      const entry = byDayMap.get(row.date)!;
+      const evt = row.event as "ADD" | "UPDATE" | "DELETE";
+      if (evt in entry) entry[evt] += row.count;
+      entry.total += row.count;
+    }
+
+    const recentRows = db.prepare(`
+      SELECT event, memory_id AS memoryId, new_memory AS newMemory, old_memory AS oldMemory, created_at AS createdAt
+      FROM history
+      WHERE is_deleted = 0
+      ORDER BY created_at DESC
+      LIMIT 20
+    `).all() as Array<{ event: string; memoryId: string; newMemory: string | null; oldMemory: string | null; createdAt: string }>;
+
+    const now = new Date();
+    const from = new Date(now);
+    from.setDate(from.getDate() - days);
+
+    return {
+      summary: {
+        totalAdded: summaryRow?.totalAdded ?? 0,
+        totalUpdated: summaryRow?.totalUpdated ?? 0,
+        totalDeleted: summaryRow?.totalDeleted ?? 0,
+        activeCount: activeRow?.activeCount ?? 0,
+        oldestEntry: summaryRow?.oldestEntry ?? null,
+        newestEntry: summaryRow?.newestEntry ?? null,
+      },
+      byDay: Array.from(byDayMap.values()),
+      recentActivity: recentRows.map((r) => ({
+        event: r.event,
+        memoryId: r.memoryId,
+        preview: (r.newMemory || r.oldMemory || "").slice(0, 100) || null,
+        createdAt: r.createdAt,
+      })),
+      window: { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) },
+    };
+  });
+
+  if (result === null) {
+    const now = new Date();
+    const from = new Date(now);
+    from.setDate(from.getDate() - days);
+    return v2Ok(res, {
+      summary: { totalAdded: 0, totalUpdated: 0, totalDeleted: 0, activeCount: 0, oldestEntry: null, newestEntry: null },
+      byDay: [],
+      recentActivity: [],
+      window: { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) },
+    }, { version: "v2" });
+  }
+
+  return v2Ok(res, result, { version: "v2" });
+});
+
+// ── batch delete ───────────────────────────────────────────────────────────
+
+const v2ForgetSchema = z.object({
+  memory_ids: z.array(z.string().uuid()).min(1).max(1000),
+  idempotency_key: z.string().trim().min(1).max(255).optional(),
+});
+
+app.post("/v2/memories/forget", async (req, res) => {
+  try {
+    const parsed = v2ForgetSchema.safeParse(req.body);
+    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+
+    const idem = idempotencyPrecheck(req, "POST:/v2/memories/forget", parsed.data);
+    if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
+    if (idem.type === "replay") return res.status(idem.status).json(idem.body);
+
+    const { memory_ids } = parsed.data;
+    const deleted: string[] = [];
+    for (const id of memory_ids) {
+      await memory.delete(id);
+      deleted.push(id);
+    }
+    runtimeStats.requests.delete += deleted.length;
+
+    const body = { ok: true, data: { deleted, count: deleted.length } };
+    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, 200, body);
+    return res.json(body);
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+// ── OpenAPI spec ───────────────────────────────────────────────────────────
+
+const V2_OPENAPI_SPEC = {
+  openapi: "3.0.3",
+  info: {
+    title: "foxmemory-store v2 API",
+    description: "Normalized memory persistence API. Success: { ok, data, meta }. Error: { type, title, status, detail, ok: false }.",
+    version: "2.0.0",
+  },
+  servers: [{ url: "/v2", description: "v2 API" }],
+  components: {
+    schemas: {
+      OkEnvelope: {
+        type: "object",
+        properties: { ok: { type: "boolean", example: true }, data: {}, meta: { type: "object" } },
+      },
+      ErrorEnvelope: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean", example: false },
+          type: { type: "string" },
+          title: { type: "string" },
+          status: { type: "integer" },
+          detail: { type: "string" },
+          errors: {},
+        },
+      },
+      Message: {
+        type: "object",
+        required: ["role", "content"],
+        properties: { role: { type: "string" }, content: { type: "string" } },
+      },
+    },
+  },
+  paths: {
+    "/health": { get: { summary: "Service health (v2 envelope)", operationId: "v2Health", responses: { "200": { description: "Health data" } } } },
+    "/stats": { get: { summary: "Runtime counters (v2 envelope)", operationId: "v2Stats", responses: { "200": { description: "Stats data" } } } },
+    "/openapi.json": { get: { summary: "This spec", operationId: "v2OpenAPI", responses: { "200": { description: "OpenAPI 3.0 JSON" } } } },
+    "/stats/memories": {
+      get: {
+        summary: "SQLite history DB analytics — byDay bar chart, summary totals, activity feed",
+        operationId: "v2StatsMemories",
+        parameters: [{ name: "days", in: "query", schema: { type: "integer", minimum: 1, maximum: 365, default: 30 } }],
+        responses: { "200": { description: "Memory analytics" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/memories": {
+      post: {
+        summary: "Add/infer memories (with optional raw fallback and idempotency)",
+        operationId: "v2AddMemories",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: {
+          messages: { type: "array", items: { $ref: "#/components/schemas/Message" } },
+          text: { type: "string" },
+          user_id: { type: "string" }, run_id: { type: "string" },
+          metadata: { type: "object" },
+          infer_preferred: { type: "boolean" }, fallback_raw: { type: "boolean" },
+          idempotency_key: { type: "string" },
+        } } } } },
+        responses: { "200": { description: "Write result" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
+      },
+      get: {
+        summary: "List memories",
+        operationId: "v2ListMemories",
+        parameters: [
+          { name: "user_id", in: "query", schema: { type: "string" } },
+          { name: "run_id", in: "query", schema: { type: "string" } },
+          { name: "scope", in: "query", schema: { type: "string", enum: ["session", "long-term", "all"] } },
+          { name: "page_size", in: "query", schema: { type: "integer", minimum: 1, maximum: 500 } },
+        ],
+        responses: { "200": { description: "Memory list" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/memories/list": {
+      post: {
+        summary: "List memories (body-based, supports filters/OR)",
+        operationId: "v2ListMemoriesPost",
+        responses: { "200": { description: "Memory list" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/memories/search": {
+      post: {
+        summary: "Semantic search",
+        operationId: "v2SearchMemories",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["query"], properties: {
+          query: { type: "string" },
+          user_id: { type: "string" }, run_id: { type: "string" },
+          scope: { type: "string", enum: ["session", "long-term", "all"] },
+          top_k: { type: "integer", minimum: 1, maximum: 100 },
+          threshold: { type: "number", minimum: 0, maximum: 1 },
+          keyword_search: { type: "boolean" }, reranking: { type: "boolean" },
+          source: { type: "string" },
+        } } } } },
+        responses: { "200": { description: "Search results" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/memories/forget": {
+      post: {
+        summary: "Batch delete up to 1000 memories by ID",
+        operationId: "v2ForgetMemories",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["memory_ids"], properties: {
+          memory_ids: { type: "array", items: { type: "string", format: "uuid" }, minItems: 1, maxItems: 1000 },
+          idempotency_key: { type: "string" },
+        } } } } },
+        responses: { "200": { description: "{ deleted: uuid[], count: number }" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
+      },
+    },
+    "/memory.write": {
+      post: {
+        summary: "Add memories — alias for POST /memories",
+        operationId: "v2MemoryWrite",
+        responses: { "200": { description: "Write result" } },
+      },
+    },
+    "/memories/{id}": {
+      get: { summary: "Get memory by ID", operationId: "v2GetMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Memory object" }, "404": { description: "Not found" } } },
+      put: { summary: "Update memory text", operationId: "v2UpdateMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Updated" }, "404": { description: "Not found" }, "409": { description: "Idempotency conflict" } } },
+      delete: { summary: "Delete memory by ID", operationId: "v2DeleteMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } } },
+    },
+  },
+} as const;
+
+app.get("/v2/openapi.json", (_req, res) => {
+  res.json(V2_OPENAPI_SPEC);
 });
 
 app.listen(PORT, () => {

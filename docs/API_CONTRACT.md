@@ -64,6 +64,26 @@ Fields:
 - `memoryEvents` → `ADD`, `UPDATE`, `DELETE`, `NONE`
 - `requests` → `add`, `search`, `list`, `get`, `delete`, `update`
 
+### `GET /health.version`
+
+Lightweight version/build metadata only (no envelope).
+
+### `GET /v2/health`
+
+Same as `GET /health` but wrapped in normalized envelope:
+
+```json
+{ "ok": true, "data": { "service": "foxmemory-store", ... }, "meta": { "version": "v2" } }
+```
+
+### `GET /v2/stats`
+
+Same as `GET /stats` but wrapped in normalized envelope:
+
+```json
+{ "ok": true, "data": { "startedAt": "...", "uptimeSec": 3600, "writesByMode": {...}, ... }, "meta": { "version": "v2" } }
+```
+
 ---
 
 ## 2) V2 API (Primary)
@@ -233,6 +253,104 @@ Success:
 }
 ```
 
+## 2.7 Batch Delete (Forget)
+
+### `POST /v2/memories/forget`
+
+Delete multiple memories in one call. Server-side loop over mem0 `delete()` — reduces client N+1 to a single HTTP request.
+
+Request body:
+
+```json
+{
+  "memory_ids": ["uuid-1", "uuid-2", "uuid-3"],
+  "idempotency_key": "optional-stable-key"
+}
+```
+
+Validation:
+- `memory_ids`: required, array of UUIDs, min 1, max 1000.
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "deleted": ["uuid-1", "uuid-2"],
+    "count": 2
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+Notes:
+- Idempotency supported (same key replays first response).
+- Each ID is deleted sequentially to avoid overwhelming Qdrant.
+- IDs that do not exist are silently skipped by mem0.
+
+## 2.8 Memory Stats (Dashboard)
+
+### `GET /v2/stats/memories?days=30`
+
+Rich analytics from the mem0 SQLite history DB. Designed for dashboard bar charts and activity feeds.
+
+Query params:
+- `days` (default: 30, max: 365) — lookback window for `byDay` and `recentActivity`.
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "summary": {
+      "total": 142,
+      "active": 138,
+      "deleted": 4,
+      "byEvent": {
+        "ADD": 98,
+        "UPDATE": 44,
+        "DELETE": 4,
+        "NONE": 0
+      }
+    },
+    "byDay": [
+      { "date": "2026-03-01", "ADD": 5, "UPDATE": 2, "DELETE": 0 },
+      { "date": "2026-03-02", "ADD": 3, "UPDATE": 1, "DELETE": 1 }
+    ],
+    "recentActivity": [
+      {
+        "id": "history-uuid",
+        "memory_id": "memory-uuid",
+        "event": "ADD",
+        "old_memory": null,
+        "new_memory": "User prefers concise answers.",
+        "created_at": "2026-03-05T12:00:00.000Z"
+      }
+    ]
+  },
+  "meta": { "version": "v2", "days": 30 }
+}
+```
+
+Data source: `MEM0_HISTORY_DB_PATH` (default `/tmp/history.db`) — mem0's persistent SQLite history.
+
+Dashboard mapping:
+- `byDay` array → bar chart (group by event type, x-axis = date)
+- `summary.byEvent` → summary totals card
+- `recentActivity` → activity feed / audit log
+
+## 2.9 OpenAPI Spec
+
+### `GET /v2/openapi.json`
+
+Returns the machine-readable OpenAPI 3.0.3 spec for all `/v2` endpoints. No auth required.
+
+```json
+{ "openapi": "3.0.3", "info": { "title": "foxmemory-store v2", ... }, "paths": { ... } }
+```
+
 ---
 
 ## 3) V1 API (Stable/Compatibility)
@@ -339,8 +457,10 @@ Common v2 titles:
   - `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`
 
 Recommended production checks:
-1. `GET /health`
-2. one `POST /v2/memory.write`
-3. one `PUT /v2/memories/:id`
-4. one `DELETE /v2/memories/:id`
-5. confirm `/stats` request/event counters move
+1. `GET /health` or `GET /v2/health`
+2. `GET /v2/openapi.json` — confirm spec is served
+3. one `POST /v2/memories` (write)
+4. one `PUT /v2/memories/:id` (update)
+5. one `DELETE /v2/memories/:id` (delete)
+6. `GET /v2/stats` — confirm request/event counters move
+7. `GET /v2/stats/memories` — confirm SQLite history DB is readable
