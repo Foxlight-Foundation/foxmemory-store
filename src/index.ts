@@ -154,7 +154,8 @@ function trackAddResult(mode: "infer" | "raw", result: any) {
     return;
   }
   for (const r of rows) {
-    const ev = String(r?.event || '').toUpperCase();
+    // mem0 OSS returns event in r.metadata.event; hosted returns r.event — handle both
+    const ev = String(r?.metadata?.event || r?.event || '').toUpperCase();
     if (ev === 'ADD') runtimeStats.memoryEvents.ADD += 1;
     else if (ev === 'UPDATE') runtimeStats.memoryEvents.UPDATE += 1;
     else if (ev === 'DELETE') runtimeStats.memoryEvents.DELETE += 1;
@@ -835,14 +836,14 @@ app.get("/v2/stats", (_req, res) => {
 
 const HISTORY_DB_PATH = process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db";
 
-function queryHistoryDb<T>(fn: (db: DatabaseSync) => T): T | null {
+function queryHistoryDb<T>(fn: (db: DatabaseSync) => T): { data: T; error: null } | { data: null; error: string } {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(HISTORY_DB_PATH);
     db.exec("PRAGMA query_only = true");
-    return fn(db);
-  } catch {
-    return null;
+    return { data: fn(db), error: null };
+  } catch (e: any) {
+    return { data: null, error: String(e?.message ?? e) };
   } finally {
     try { db?.close(); } catch { /* ignore */ }
   }
@@ -857,6 +858,11 @@ app.get("/v2/stats/memories", (req, res) => {
   if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
   const { days } = parsed.data;
+
+  // Also discover DB tables for diagnostics
+  const tablesResult = queryHistoryDb((db) =>
+    (db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{ name: string }>).map(r => r.name)
+  );
 
   const result = queryHistoryDb((db) => {
     const summaryRow = db.prepare(`
@@ -929,7 +935,10 @@ app.get("/v2/stats/memories", (req, res) => {
     };
   });
 
-  if (result === null) {
+  const tables = tablesResult.data ?? [];
+  const _debug = { dbPath: HISTORY_DB_PATH, tables, dbError: result.error ?? tablesResult.error ?? null };
+
+  if (result.data === null) {
     const now = new Date();
     const from = new Date(now);
     from.setDate(from.getDate() - days);
@@ -938,10 +947,11 @@ app.get("/v2/stats/memories", (req, res) => {
       byDay: [],
       recentActivity: [],
       window: { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) },
+      _debug,
     }, { version: "v2" });
   }
 
-  return v2Ok(res, result, { version: "v2" });
+  return v2Ok(res, { ...result.data, _debug }, { version: "v2" });
 });
 
 // ── batch delete ───────────────────────────────────────────────────────────
