@@ -1161,11 +1161,43 @@ app.get("/v2/health", async (_req, res) => {
 app.get("/v2/stats", (_req, res) => {
   const started = Date.parse(runtimeStats.startedAt);
   const uptimeSec = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : null;
+
+  // Prefer persistent SQLite counts (survive restarts) over in-memory runtime counters.
+  let writesByMode = runtimeStats.writesByMode;
+  let memoryEvents = runtimeStats.memoryEvents;
+  if (analyticsDb?.ready) {
+    try {
+      const db = (analyticsDb as any).db;
+      // Count distinct calls by mode. COALESCE(call_id, id) treats legacy rows (no call_id) as individual calls.
+      const modeRow = db.prepare(
+        `SELECT
+           SUM(CASE WHEN infer_mode = 1 THEN 1 ELSE 0 END) AS infer,
+           SUM(CASE WHEN infer_mode = 0 THEN 1 ELSE 0 END) AS raw
+         FROM (
+           SELECT COALESCE(call_id, id) AS call_key, MAX(infer_mode) AS infer_mode
+           FROM write_events
+           GROUP BY call_key
+         )`
+      ).get() as any;
+      writesByMode = { infer: Number(modeRow?.infer ?? 0), raw: Number(modeRow?.raw ?? 0) };
+
+      const events = db.prepare(
+        `SELECT event_type, COUNT(*) AS n FROM write_events GROUP BY event_type`
+      ).all() as any[];
+      memoryEvents = { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 };
+      for (const r of events) {
+        if (r.event_type in memoryEvents) (memoryEvents as any)[r.event_type] = Number(r.n);
+      }
+    } catch {
+      // fall through to runtime counters
+    }
+  }
+
   return v2Ok(res, {
     startedAt: runtimeStats.startedAt,
     uptimeSec,
-    writesByMode: runtimeStats.writesByMode,
-    memoryEvents: runtimeStats.memoryEvents,
+    writesByMode,
+    memoryEvents,
     requests: runtimeStats.requests,
   }, { version: "v2" });
 });
