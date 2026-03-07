@@ -1015,7 +1015,7 @@ async function checkNeo4jHealth(): Promise<{
   error?: string;
 } | null> {
   if (!GRAPH_ENABLED) return null;
-  const driver = (memory as any).graph?.driver;
+  const driver = (memory as any).graphMemory?.graph;
   if (!driver) return { connected: false, nodeCount: null, relationCount: null, error: "graph driver not initialized" };
 
   const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
@@ -1551,7 +1551,7 @@ app.get("/v2/graph/relations", async (req, res) => {
   if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
   try {
-    const graphStore = (memory as any).graph;
+    const graphStore = (memory as any).graphMemory;
     if (!graphStore) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Graph store not initialized");
 
     const filters: any = {};
