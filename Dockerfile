@@ -1,4 +1,4 @@
-FROM qdrant/qdrant:v1.13.2 AS qdrant
+FROM qdrant/qdrant:v1.17.0 AS qdrant
 
 # ── Build stage ──────────────────────────────────────────────────────────────
 # python3/make/g++ are needed only to compile sqlite3 native bindings.
