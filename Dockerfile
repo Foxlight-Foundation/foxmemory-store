@@ -1,19 +1,29 @@
 FROM qdrant/qdrant:v1.13.2 AS qdrant
-FROM node:22-alpine
 
-RUN addgroup -S app && adduser -S app -G app
+# ── Build stage ──────────────────────────────────────────────────────────────
+# python3/make/g++ are needed only to compile sqlite3 native bindings.
+# They are NOT copied to the runtime stage.
+FROM node:22-alpine AS builder
 WORKDIR /app
-
-# Node app build
-# sqlite3 may require local compilation when prebuild download is unavailable.
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ && npm install -g npm@latest
 COPY package.json .npmrc tsconfig.json ./
 COPY src ./src
 RUN --mount=type=secret,id=npm_token \
     echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/npm_token)" >> .npmrc && \
     npm install && npm run build && npm prune --omit=dev && \
-    # Remove auth token from image
     sed -i '/_authToken/d' .npmrc
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+FROM node:22-alpine
+RUN npm install -g npm@latest \
+ && addgroup -S app && adduser -S app -G app
+WORKDIR /app
+
+# App (built output + prod node_modules only — no build tools)
+COPY --from=builder /app/dist       ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/.npmrc     ./.npmrc
 
 # Embedded qdrant binary
 COPY --from=qdrant /qdrant /qdrant
