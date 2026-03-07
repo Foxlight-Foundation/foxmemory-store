@@ -31,6 +31,13 @@ const NEO4J_USERNAME = process.env.NEO4J_USERNAME || "neo4j";
 const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || null;
 const GRAPH_LLM_MODEL = process.env.MEM0_GRAPH_LLM_MODEL || LLM_MODEL;
 const GRAPH_ENABLED = Boolean(NEO4J_URL && NEO4J_PASSWORD);
+// Graph similarity/reranking tuning (all optional — defaults match fork hardcodes)
+const GRAPH_SEARCH_THRESHOLD = process.env.MEM0_GRAPH_SEARCH_THRESHOLD
+  ? Number(process.env.MEM0_GRAPH_SEARCH_THRESHOLD) : undefined;
+const GRAPH_NODE_DEDUP_THRESHOLD = process.env.MEM0_GRAPH_NODE_DEDUP_THRESHOLD
+  ? Number(process.env.MEM0_GRAPH_NODE_DEDUP_THRESHOLD) : undefined;
+const GRAPH_BM25_TOPK = process.env.MEM0_GRAPH_BM25_TOPK
+  ? parseInt(process.env.MEM0_GRAPH_BM25_TOPK, 10) : undefined;
 
 function sanitizeBaseUrl(url?: string) {
   if (!url) return null;
@@ -185,6 +192,9 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
             // Optional custom prompt for entity/relation extraction (Call 3).
             // Injected as rule #4 into EXTRACT_RELATIONS_PROMPT in the fork.
             ...(customGraphPrompt ? { customPrompt: customGraphPrompt } : {}),
+            ...(GRAPH_SEARCH_THRESHOLD !== undefined ? { searchThreshold: GRAPH_SEARCH_THRESHOLD } : {}),
+            ...(GRAPH_NODE_DEDUP_THRESHOLD !== undefined ? { nodeDeduplicationThreshold: GRAPH_NODE_DEDUP_THRESHOLD } : {}),
+            ...(GRAPH_BM25_TOPK !== undefined ? { bm25TopK: GRAPH_BM25_TOPK } : {}),
             // Optional separate LLM for graph entity/relation extraction.
             // Defaults to the main LLM_MODEL if MEM0_GRAPH_LLM_MODEL is not set.
             ...(GRAPH_LLM_MODEL !== LLM_MODEL
@@ -709,7 +719,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
         attempts: ADD_RETRIES,
         infer: { resultCount: inferResult.results.length },
         result: inferResult,
-        ...(GRAPH_ENABLED ? { relations: inferResult.relations || [] } : {}),
+        decisions: inferResult.decisions ?? null,
+        ...(GRAPH_ENABLED ? { relations: inferResult.relations || [], added_entities: inferResult.added_entities || [] } : {}),
       };
     }
   }
@@ -722,7 +733,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
       attempts: inferPreferred ? ADD_RETRIES : 0,
       infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
       result: inferResult,
-      ...(GRAPH_ENABLED ? { relations: inferResult?.relations || [] } : {}),
+      decisions: inferResult?.decisions ?? null,
+      ...(GRAPH_ENABLED ? { relations: inferResult?.relations || [], added_entities: inferResult?.added_entities || [] } : {}),
     };
   }
 
@@ -747,7 +759,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
     infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
     fallback: { resultCount: Array.isArray(rawResult?.results) ? rawResult.results.length : 0 },
     result: rawResult,
-    ...(GRAPH_ENABLED ? { relations: rawResult?.relations || [] } : {}),
+    decisions: rawResult?.decisions ?? null,
+    ...(GRAPH_ENABLED ? { relations: rawResult?.relations || [], added_entities: rawResult?.added_entities || [] } : {}),
   };
 }
 
@@ -769,10 +782,11 @@ app.post("/v2/memory.write", async (req, res) => {
       inputChars: inputCharsFromBody(parsed.data),
       latencyMs,
       inferMode: parsed.data.infer_preferred !== false,
+      decisions: (out as any).decisions ?? undefined,
     });
     if (GRAPH_ENABLED) {
       const graphRelations: any[] = (out as any).relations || [];
-      const addedEntities: any[] = out.result?.added_entities || [];
+      const addedEntities: any[] = (out as any).added_entities || [];
       analyticsDb?.recordGraphWrite({
         user_id: parsed.data.user_id,
         run_id: parsed.data.run_id,
@@ -808,10 +822,11 @@ app.post("/v2/memories", async (req, res) => {
       inputChars: inputCharsFromBody(parsed.data),
       latencyMs,
       inferMode: parsed.data.infer_preferred !== false,
+      decisions: (out as any).decisions ?? undefined,
     });
     if (GRAPH_ENABLED) {
       const graphRelations: any[] = (out as any).relations || [];
-      const addedEntities: any[] = out.result?.added_entities || [];
+      const addedEntities: any[] = (out as any).added_entities || [];
       analyticsDb?.recordGraphWrite({
         user_id: parsed.data.user_id,
         run_id: parsed.data.run_id,
@@ -1222,7 +1237,10 @@ class FoxAnalyticsDB {
     `);
     // Additive migrations for existing DBs (SQLite ALTER TABLE has no IF NOT EXISTS)
     for (const sql of [
-      "ALTER TABLE write_events  ADD COLUMN call_id   TEXT",
+      "ALTER TABLE write_events  ADD COLUMN call_id              TEXT",
+      "ALTER TABLE write_events  ADD COLUMN reason               TEXT",
+      "ALTER TABLE write_events  ADD COLUMN extracted_facts_json TEXT",
+      "ALTER TABLE write_events  ADD COLUMN candidates_json      TEXT",
       "ALTER TABLE search_events ADD COLUMN graph_hit INTEGER DEFAULT 0",
     ]) {
       try { this.db.exec(sql); } catch { /* column already exists */ }
@@ -1252,25 +1270,32 @@ class FoxAnalyticsDB {
     inputChars: number;
     latencyMs: number;
     inferMode: boolean;
+    decisions?: { extractedFacts: string[]; candidates: { id: string; text: string }[]; actions: any[] };
   }) {
     if (!this.ready) return;
     const ts = new Date().toISOString();
     const callId = crypto.randomUUID(); // groups all events from one memory.add() call
+    const extractedFactsJson = opts.decisions?.extractedFacts?.length
+      ? JSON.stringify(opts.decisions.extractedFacts) : null;
+    const candidatesJson = opts.decisions?.candidates?.length
+      ? JSON.stringify(opts.decisions.candidates) : null;
     const stmt = this.db.prepare(
-      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode, call_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode, call_id, reason, extracted_facts_json, candidates_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     // If mem0 returned no results, record a single NONE row
     const rows = opts.results.length ? opts.results : [null];
     for (const r of rows) {
       const event = r ? String(r?.metadata?.event || r?.event || "NONE").toUpperCase() : "NONE";
       const memText = r?.memory ? String(r.memory).slice(0, 500) : null;
+      const reason = r?.metadata?.reason ? String(r.metadata.reason).slice(0, 500) : null;
       try {
         stmt.run(
           crypto.randomUUID(), ts, event, r?.id ?? null,
           opts.user_id ?? null, opts.run_id ?? null,
           opts.inputChars, memText, LLM_MODEL,
-          opts.latencyMs, opts.inferMode ? 1 : 0, callId
+          opts.latencyMs, opts.inferMode ? 1 : 0, callId,
+          reason, extractedFactsJson, candidatesJson
         );
       } catch { /* non-critical — never crash the request */ }
     }
@@ -1529,6 +1554,66 @@ app.get("/v2/stats/memories", (req, res) => {
   }
 
   return v2Ok(res, { ...stats, window }, { version: "v2" });
+});
+
+// ── write-events browse ────────────────────────────────────────────────────
+
+const v2WriteEventsQuerySchema = z.object({
+  user_id:    z.string().trim().min(1).optional(),
+  run_id:     z.string().trim().min(1).optional(),
+  memory_id:  z.string().uuid().optional(),
+  event_type: z.enum(["ADD", "UPDATE", "DELETE", "NONE"]).optional(),
+  limit:      z.coerce.number().int().positive().max(500).default(50),
+  before:     z.string().optional(), // ISO date string — return events before this ts
+});
+
+app.get("/v2/write-events", (req, res) => {
+  const parsed = v2WriteEventsQuerySchema.safeParse(req.query);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+  if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
+
+  try {
+    const { user_id, run_id, memory_id, event_type, limit, before } = parsed.data;
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (user_id)    { conditions.push("user_id = ?");    params.push(user_id); }
+    if (run_id)     { conditions.push("run_id = ?");     params.push(run_id); }
+    if (memory_id)  { conditions.push("memory_id = ?");  params.push(memory_id); }
+    if (event_type) { conditions.push("event_type = ?"); params.push(event_type); }
+    if (before)     { conditions.push("ts < ?");         params.push(before); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.push(limit);
+
+    const rows = (analyticsDb as any).db.prepare(
+      `SELECT id, ts, event_type, memory_id, user_id, run_id, output_text,
+              reason, extracted_facts_json, candidates_json, call_id, latency_ms, infer_mode
+       FROM write_events ${where}
+       ORDER BY ts DESC
+       LIMIT ?`
+    ).all(...params) as any[];
+
+    const events = rows.map((r: any) => ({
+      id: r.id,
+      ts: r.ts,
+      event_type: r.event_type,
+      memory_id: r.memory_id,
+      user_id: r.user_id,
+      run_id: r.run_id,
+      memory_text: r.output_text,
+      reason: r.reason ?? null,
+      extracted_facts: r.extracted_facts_json ? JSON.parse(r.extracted_facts_json) : null,
+      candidates: r.candidates_json ? JSON.parse(r.candidates_json) : null,
+      call_id: r.call_id,
+      latency_ms: r.latency_ms,
+      infer_mode: Boolean(r.infer_mode),
+    }));
+
+    return v2Ok(res, { events, count: events.length }, { version: "v2" });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
 });
 
 // ── graph relations browse ─────────────────────────────────────────────────
