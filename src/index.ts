@@ -23,6 +23,15 @@ const HAS_OPENAI_API_KEY = Boolean(process.env.OPENAI_API_KEY);
 const LLM_MODEL = process.env.MEM0_LLM_MODEL || "gpt-4.1-nano";
 const EMBED_MODEL = process.env.MEM0_EMBED_MODEL || "text-embedding-3-small";
 
+// Graph memory (Neo4j). Enabled when NEO4J_URL + NEO4J_PASSWORD are set.
+// MEM0_GRAPH_LLM_MODEL lets you use a separate, more capable model for entity/relation extraction.
+// Recommended hosted: gpt-4o-mini. Recommended local: Qwen2.5-14B-Instruct or Mistral-Small-3.1-24B.
+const NEO4J_URL = process.env.NEO4J_URL || null;
+const NEO4J_USERNAME = process.env.NEO4J_USERNAME || "neo4j";
+const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || null;
+const GRAPH_LLM_MODEL = process.env.MEM0_GRAPH_LLM_MODEL || LLM_MODEL;
+const GRAPH_ENABLED = Boolean(NEO4J_URL && NEO4J_PASSWORD);
+
 function sanitizeBaseUrl(url?: string) {
   if (!url) return null;
   try {
@@ -156,7 +165,34 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
             }
           }
         }
-      : {})
+      : {}),
+    ...(GRAPH_ENABLED
+      ? {
+          enableGraph: true,
+          graphStore: {
+            provider: "neo4j",
+            config: {
+              url: NEO4J_URL!,
+              username: NEO4J_USERNAME,
+              password: NEO4J_PASSWORD!,
+            },
+            // Optional separate LLM for graph entity/relation extraction.
+            // Defaults to the main LLM_MODEL if MEM0_GRAPH_LLM_MODEL is not set.
+            ...(GRAPH_LLM_MODEL !== LLM_MODEL
+              ? {
+                  llm: {
+                    provider: "openai",
+                    config: {
+                      apiKey: OPENAI_API_KEY,
+                      model: GRAPH_LLM_MODEL,
+                      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {}),
+                    },
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
   });
 }
 
@@ -287,7 +323,10 @@ app.get("/health", (_req, res) => {
     diagnostics: {
       authMode: AUTH_MODE,
       openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
-      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED
+      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+      graphEnabled: GRAPH_ENABLED,
+      neo4jUrl: NEO4J_URL,
+      graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
     }
   });
 });
@@ -787,17 +826,19 @@ app.post("/v2/memories/search", async (req, res) => {
       ]);
       const merged = [...(a?.results || []), ...(b?.results || [])];
       const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values()).slice(0, limit);
+      const relations = [...(a?.relations || []), ...(b?.relations || [])];
       const topScore = dedup[0]?.score ?? dedup[0]?.similarity ?? undefined;
-      analyticsDb?.recordSearch({ user_id: body.user_id, run_id: body.run_id, queryChars: body.query.length, resultCount: dedup.length, topScore, latencyMs: Date.now() - t0 });
-      return v2Ok(res, { results: dedup }, { scope: "all", count: dedup.length });
+      analyticsDb?.recordSearch({ user_id: body.user_id, run_id: body.run_id, queryChars: body.query.length, resultCount: dedup.length, topScore, latencyMs: Date.now() - t0, graphHit: relations.length > 0 });
+      return v2Ok(res, { results: dedup, ...(GRAPH_ENABLED ? { relations } : {}) }, { scope: "all", count: dedup.length });
     }
 
     const t0 = Date.now();
     const result = await runSearch(body.query, ids.user_id, ids.run_id);
     const results = result?.results || [];
+    const relations = result?.relations || [];
     const topScore = (results[0] as any)?.score ?? (results[0] as any)?.similarity ?? undefined;
-    analyticsDb?.recordSearch({ user_id: ids.user_id, run_id: ids.run_id, queryChars: body.query.length, resultCount: results.length, topScore, latencyMs: Date.now() - t0 });
-    return v2Ok(res, { results }, { scope: body.scope || "direct", count: results.length });
+    analyticsDb?.recordSearch({ user_id: ids.user_id, run_id: ids.run_id, queryChars: body.query.length, resultCount: results.length, topScore, latencyMs: Date.now() - t0, graphHit: relations.length > 0 });
+    return v2Ok(res, { results, ...(GRAPH_ENABLED ? { relations } : {}) }, { scope: body.scope || "direct", count: results.length });
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
@@ -1018,6 +1059,9 @@ app.get("/v2/health", (_req, res) => {
       authMode: AUTH_MODE,
       openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
       openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+      graphEnabled: GRAPH_ENABLED,
+      neo4jUrl: NEO4J_URL,
+      graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
     },
   }, { version: "v2" });
 });
@@ -1065,11 +1109,13 @@ class FoxAnalyticsDB {
         output_text TEXT,
         llm_model  TEXT,
         latency_ms INTEGER,
-        infer_mode INTEGER DEFAULT 1
+        infer_mode INTEGER DEFAULT 1,
+        call_id    TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_we_ts    ON write_events(ts);
       CREATE INDEX IF NOT EXISTS idx_we_event ON write_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_we_user  ON write_events(user_id);
+      CREATE INDEX IF NOT EXISTS idx_we_call  ON write_events(call_id);
 
       CREATE TABLE IF NOT EXISTS search_events (
         id           TEXT PRIMARY KEY,
@@ -1079,15 +1125,36 @@ class FoxAnalyticsDB {
         query_chars  INTEGER,
         result_count INTEGER,
         top_score    REAL,
-        latency_ms   INTEGER
+        latency_ms   INTEGER,
+        graph_hit    INTEGER DEFAULT 0
       );
-      CREATE INDEX IF NOT EXISTS idx_se_ts ON search_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_se_ts   ON search_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_se_user ON search_events(user_id);
+
+      CREATE TABLE IF NOT EXISTS graph_events (
+        id               TEXT PRIMARY KEY,
+        ts               TEXT NOT NULL,
+        user_id          TEXT,
+        run_id           TEXT,
+        entities_added   INTEGER,
+        relations_added  INTEGER,
+        latency_ms       INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_ge_ts   ON graph_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_ge_user ON graph_events(user_id);
 
       CREATE TABLE IF NOT EXISTS config (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
     `);
+    // Additive migrations for existing DBs (SQLite ALTER TABLE has no IF NOT EXISTS)
+    for (const sql of [
+      "ALTER TABLE write_events  ADD COLUMN call_id   TEXT",
+      "ALTER TABLE search_events ADD COLUMN graph_hit INTEGER DEFAULT 0",
+    ]) {
+      try { this.db.exec(sql); } catch { /* column already exists */ }
+    }
     this.ready = true;
   }
 
@@ -1116,9 +1183,10 @@ class FoxAnalyticsDB {
   }) {
     if (!this.ready) return;
     const ts = new Date().toISOString();
+    const callId = crypto.randomUUID(); // groups all events from one memory.add() call
     const stmt = this.db.prepare(
-      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode, call_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     // If mem0 returned no results, record a single NONE row
     const rows = opts.results.length ? opts.results : [null];
@@ -1130,7 +1198,7 @@ class FoxAnalyticsDB {
           crypto.randomUUID(), ts, event, r?.id ?? null,
           opts.user_id ?? null, opts.run_id ?? null,
           opts.inputChars, memText, LLM_MODEL,
-          opts.latencyMs, opts.inferMode ? 1 : 0
+          opts.latencyMs, opts.inferMode ? 1 : 0, callId
         );
       } catch { /* non-critical — never crash the request */ }
     }
@@ -1143,16 +1211,38 @@ class FoxAnalyticsDB {
     resultCount: number;
     topScore?: number;
     latencyMs: number;
+    graphHit?: boolean;
   }) {
     if (!this.ready) return;
     try {
       this.db.prepare(
-        `INSERT INTO search_events (id, ts, user_id, run_id, query_chars, result_count, top_score, latency_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO search_events (id, ts, user_id, run_id, query_chars, result_count, top_score, latency_ms, graph_hit)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         crypto.randomUUID(), new Date().toISOString(),
         opts.user_id ?? null, opts.run_id ?? null,
-        opts.queryChars, opts.resultCount, opts.topScore ?? null, opts.latencyMs
+        opts.queryChars, opts.resultCount, opts.topScore ?? null, opts.latencyMs,
+        opts.graphHit ? 1 : 0
+      );
+    } catch { /* non-critical */ }
+  }
+
+  recordGraphWrite(opts: {
+    user_id?: string;
+    run_id?: string;
+    entitiesAdded?: number;
+    relationsAdded?: number;
+    latencyMs: number;
+  }) {
+    if (!this.ready) return;
+    try {
+      this.db.prepare(
+        `INSERT INTO graph_events (id, ts, user_id, run_id, entities_added, relations_added, latency_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        crypto.randomUUID(), new Date().toISOString(),
+        opts.user_id ?? null, opts.run_id ?? null,
+        opts.entitiesAdded ?? null, opts.relationsAdded ?? null, opts.latencyMs
       );
     } catch { /* non-critical */ }
   }
@@ -1160,18 +1250,28 @@ class FoxAnalyticsDB {
   getStats(days: number) {
     if (!this.ready) return null;
     try {
-      // All-time event counts
+      // All-time event counts (per mem0 event row)
       const eventRows = this.db.prepare(
         `SELECT event_type, COUNT(*) as count FROM write_events GROUP BY event_type`
       ).all() as Array<{ event_type: string; count: number }>;
 
       const byEvent: Record<string, number> = { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 };
-      let total = 0;
       for (const r of eventRows) {
         byEvent[r.event_type] = (byEvent[r.event_type] ?? 0) + r.count;
-        total += r.count;
       }
-      const noneRatePct = total > 0 ? Math.round((byEvent.NONE / total) * 100) : 0;
+
+      // NONE rate per write *call* (call_id groups all events from one memory.add()).
+      // Falls back to 0 for rows predating the call_id migration.
+      const callStats = this.db.prepare(`
+        SELECT
+          COUNT(DISTINCT call_id) as totalCalls,
+          COUNT(DISTINCT CASE WHEN event_type = 'NONE' THEN call_id END) as noneCalls
+        FROM write_events WHERE call_id IS NOT NULL
+      `).get() as any;
+      const noneRatePct = (callStats?.totalCalls ?? 0) > 0
+        ? Math.round(((callStats.noneCalls ?? 0) / callStats.totalCalls) * 100)
+        : 0;
+      const totalCalls = callStats?.totalCalls ?? 0;
 
       // Write latency summary
       const latRow = this.db.prepare(
@@ -1179,7 +1279,7 @@ class FoxAnalyticsDB {
          FROM write_events WHERE latency_ms IS NOT NULL`
       ).get() as any;
 
-      // By day — event counts + avg latency per day in window
+      // By day — event counts + avg latency per day in window (writes)
       const byDayRaw = this.db.prepare(`
         SELECT date(ts) as date, event_type, COUNT(*) as count,
                CAST(AVG(latency_ms) AS INTEGER) as avg_latency_ms
@@ -1203,18 +1303,49 @@ class FoxAnalyticsDB {
         FROM write_events ORDER BY ts DESC LIMIT 20
       `).all() as any[];
 
-      // Search summary
+      // Search summary (all-time)
       const searchRow = this.db.prepare(`
         SELECT COUNT(*) as total,
+               SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END) as zeroResults,
+               SUM(CASE WHEN graph_hit = 1 THEN 1 ELSE 0 END) as graphHits,
                CAST(AVG(result_count) * 10 AS INTEGER) / 10.0 as avgResults,
                CAST(AVG(top_score) * 1000 AS INTEGER) / 1000.0 as avgTopScore,
                CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
         FROM search_events
       `).get() as any;
 
+      const searchTotal = searchRow?.total ?? 0;
+      const zeroResultRatePct = searchTotal > 0
+        ? Math.round(((searchRow?.zeroResults ?? 0) / searchTotal) * 100)
+        : 0;
+      const graphHitRatePct = searchTotal > 0
+        ? Math.round(((searchRow?.graphHits ?? 0) / searchTotal) * 100)
+        : 0;
+
+      // Search by day (within window)
+      const searchByDayRaw = this.db.prepare(`
+        SELECT date(ts) as date,
+               COUNT(*) as count,
+               SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END) as zeroResults,
+               CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
+        FROM search_events
+        WHERE ts >= datetime('now', '-' || ? || ' days')
+        GROUP BY date(ts)
+        ORDER BY date(ts) ASC
+      `).all(days) as Array<{ date: string; count: number; zeroResults: number; avgLatencyMs: number | null }>;
+
+      // Graph summary
+      const graphRow = this.db.prepare(`
+        SELECT COUNT(*) as totalWrites,
+               SUM(relations_added) as totalRelations,
+               SUM(entities_added) as totalEntities,
+               CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
+        FROM graph_events
+      `).get() as any;
+
       return {
         summary: {
-          total,
+          totalCalls,
           byEvent,
           noneRatePct,
           writeLatency: {
@@ -1236,10 +1367,20 @@ class FoxAnalyticsDB {
           inferMode: r.infer_mode === 1,
         })),
         searches: {
-          total: searchRow?.total ?? 0,
+          total: searchTotal,
+          zeroResultRatePct,
+          graphHitRatePct,
           avgResults: searchRow?.avgResults ?? null,
           avgTopScore: searchRow?.avgTopScore ?? null,
           avgLatencyMs: searchRow?.avgLatencyMs ?? null,
+          byDay: searchByDayRaw,
+        },
+        graph: {
+          enabled: GRAPH_ENABLED,
+          totalWrites: graphRow?.totalWrites ?? 0,
+          totalRelations: graphRow?.totalRelations ?? 0,
+          totalEntities: graphRow?.totalEntities ?? 0,
+          avgWriteLatencyMs: graphRow?.avgLatencyMs ?? null,
         },
       };
     } catch (e) {
@@ -1377,18 +1518,82 @@ const V2_OPENAPI_SPEC = {
         required: ["role", "content"],
         properties: { role: { type: "string" }, content: { type: "string" } },
       },
+      GraphRelation: {
+        type: "object",
+        description: "A knowledge graph triple from Neo4j (only present when graph memory is enabled).",
+        properties: {
+          source: { type: "string" },
+          relationship: { type: "string" },
+          destination: { type: "string" },
+        },
+      },
+      SearchResponse: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" }, description: "Vector search results from Qdrant." },
+          relations: {
+            type: "array",
+            items: { $ref: "#/components/schemas/GraphRelation" },
+            description: "Graph memory results. Only present when NEO4J_URL is configured.",
+          },
+        },
+      },
+      HealthDiagnostics: {
+        type: "object",
+        properties: {
+          authMode: { type: "string" },
+          openaiApiKeyConfigured: { type: "boolean" },
+          openaiBaseUrl: { type: "string", nullable: true },
+          graphEnabled: { type: "boolean", description: "True when NEO4J_URL + NEO4J_PASSWORD are set." },
+          neo4jUrl: { type: "string", nullable: true },
+          graphLlmModel: { type: "string", nullable: true },
+        },
+      },
+      StatsMemoriesSummary: {
+        type: "object",
+        properties: {
+          totalCalls: { type: "integer", description: "Total memory.add() calls recorded (post-migration)." },
+          byEvent: { type: "object", description: "ADD/UPDATE/DELETE/NONE row counts (all-time)." },
+          noneRatePct: { type: "integer", description: "% of write calls where mem0 decided no memory was needed." },
+          writeLatency: { type: "object", properties: { avgMs: { type: "integer", nullable: true }, minMs: { type: "integer", nullable: true }, maxMs: { type: "integer", nullable: true } } },
+          model: { type: "object", properties: { llm: { type: "string" }, embed: { type: "string" } } },
+        },
+      },
+      StatsMemoriesSearches: {
+        type: "object",
+        properties: {
+          total: { type: "integer" },
+          zeroResultRatePct: { type: "integer", description: "% of searches that returned 0 results." },
+          graphHitRatePct: { type: "integer", description: "% of searches that returned graph relations (requires graph enabled)." },
+          avgResults: { type: "number", nullable: true },
+          avgTopScore: { type: "number", nullable: true },
+          avgLatencyMs: { type: "integer", nullable: true },
+          byDay: { type: "array", items: { type: "object", properties: { date: { type: "string" }, count: { type: "integer" }, zeroResults: { type: "integer" }, avgLatencyMs: { type: "integer", nullable: true } } } },
+        },
+      },
+      StatsMemoriesGraph: {
+        type: "object",
+        description: "Graph memory analytics. totalRelations/totalEntities are 0 when graph is disabled.",
+        properties: {
+          enabled: { type: "boolean" },
+          totalWrites: { type: "integer" },
+          totalRelations: { type: "integer" },
+          totalEntities: { type: "integer" },
+          avgWriteLatencyMs: { type: "integer", nullable: true },
+        },
+      },
     },
   },
   paths: {
-    "/health": { get: { summary: "Service health (v2 envelope)", operationId: "v2Health", responses: { "200": { description: "Health data" } } } },
+    "/health": { get: { summary: "Service health (v2 envelope)", operationId: "v2Health", responses: { "200": { description: "Health data including graphEnabled, neo4jUrl, graphLlmModel diagnostics.", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { diagnostics: { $ref: "#/components/schemas/HealthDiagnostics" } } } } }] } } } } } } },
     "/stats": { get: { summary: "Runtime counters (v2 envelope)", operationId: "v2Stats", responses: { "200": { description: "Stats data" } } } },
     "/openapi.json": { get: { summary: "This spec", operationId: "v2OpenAPI", responses: { "200": { description: "OpenAPI 3.0 JSON" } } } },
     "/stats/memories": {
       get: {
-        summary: "SQLite history DB analytics — byDay bar chart, summary totals, activity feed",
+        summary: "SQLite history DB analytics — byDay bar chart, summary totals, activity feed, search quality, graph stats",
         operationId: "v2StatsMemories",
         parameters: [{ name: "days", in: "query", schema: { type: "integer", minimum: 1, maximum: 365, default: 30 } }],
-        responses: { "200": { description: "Memory analytics" }, "400": { description: "Validation error" } },
+        responses: { "200": { description: "Memory analytics", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { summary: { $ref: "#/components/schemas/StatsMemoriesSummary" }, byDay: { type: "array" }, recentActivity: { type: "array" }, searches: { $ref: "#/components/schemas/StatsMemoriesSearches" }, graph: { $ref: "#/components/schemas/StatsMemoriesGraph" } } } } }] } } } }, "400": { description: "Validation error" } },
       },
     },
     "/memories": {
@@ -1437,7 +1642,7 @@ const V2_OPENAPI_SPEC = {
           keyword_search: { type: "boolean" }, reranking: { type: "boolean" },
           source: { type: "string" },
         } } } } },
-        responses: { "200": { description: "Search results" }, "400": { description: "Validation error" } },
+        responses: { "200": { description: "Search results", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { $ref: "#/components/schemas/SearchResponse" } } }] } } } }, "400": { description: "Validation error" } },
       },
     },
     "/memories/forget": {
@@ -1501,7 +1706,10 @@ app.listen(PORT, () => {
         embedModel: EMBED_MODEL,
         qdrantHost: process.env.QDRANT_HOST || null,
         qdrantPort: process.env.QDRANT_PORT ? Number(process.env.QDRANT_PORT) : null,
-        qdrantCollection: process.env.QDRANT_COLLECTION || "foxmemory"
+        qdrantCollection: process.env.QDRANT_COLLECTION || "foxmemory",
+        graphEnabled: GRAPH_ENABLED,
+        neo4jUrl: NEO4J_URL,
+        graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
       },
       null,
       0
