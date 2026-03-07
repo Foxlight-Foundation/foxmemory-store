@@ -1231,7 +1231,7 @@ class FoxAnalyticsDB {
           memoryId: r.memory_id,
           userId: r.user_id,
           runId: r.run_id,
-          preview: r.output_text ? (r.output_text as string).slice(0, 100) : null,
+          preview: r.output_text ?? null,
           latencyMs: r.latency_ms,
           inferMode: r.infer_mode === 1,
         })),
