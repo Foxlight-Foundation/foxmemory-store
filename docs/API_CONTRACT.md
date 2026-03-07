@@ -535,11 +535,166 @@ Request body:
 
 ---
 
-## 2.11 Graph Relations Browse _(graph-enabled only)_
+## 2.11 Graph API _(graph-enabled only)_
+
+All endpoints below return `400 BAD_REQUEST` when graph memory is not enabled (`NEO4J_URL` unset).
+
+Node objects have this shape (`embedding` is always stripped):
+```json
+{
+  "id": "4:abc123:0",
+  "labels": ["person"],
+  "name": "thomas",
+  "properties": { "user_id": "user@example.com", "created": "2026-03-07T..." }
+}
+```
+
+Edge objects have this shape:
+```json
+{
+  "id": "5:abc123:0",
+  "source": "4:abc123:0",
+  "target": "4:def456:1",
+  "type": "WORKS_AT",
+  "created": "2026-03-07T...",
+  "properties": {}
+}
+```
+
+---
+
+### `GET /v2/graph?user_id=&run_id=&limit=`
+
+Full node+edge graph for a user/run. Primary endpoint for rendering a force-directed graph. Feed `nodes` and `edges` directly into `react-force-graph` or equivalent.
+
+Query params:
+- `user_id` or `run_id` (optional — omit to return all nodes)
+- `limit` — max nodes returned, default 500, max 1000; edges are fetched at `limit * 4`
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "nodes": [ ...GraphNode ],
+    "edges": [ ...GraphEdge ],
+    "meta": { "nodeCount": 72, "edgeCount": 56 }
+  }
+}
+```
+
+---
+
+### `GET /v2/graph/nodes?user_id=&run_id=&page=&page_size=`
+
+Paginated flat list of entity nodes. Useful for a sidebar, search-before-render flow, or large graphs where full fetch is too heavy.
+
+Query params:
+- `user_id`, `run_id` (optional)
+- `page` — 0-indexed, default 0
+- `page_size` — default 100, max 200
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": { "nodes": [ ...GraphNode ], "page": 0, "page_size": 100, "count": 72 }
+}
+```
+
+---
+
+### `GET /v2/graph/nodes/:id`
+
+Single node detail with full direct neighborhood. Powers "click to explore" — when a user clicks a node, fetch its neighbors and render the subgraph.
+
+`:id` is the Neo4j `elementId` string (e.g. `"4:abc123:0"`), returned in all node objects.
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "node": { ...GraphNode },
+    "neighbors": [ ...GraphNode ],
+    "edges": [ ...GraphEdge ]
+  }
+}
+```
+
+- Returns `404 NOT_FOUND` when the node ID doesn't exist.
+- `edges` contains all edges directly connecting `node` to any `neighbor` (both directions).
+
+---
+
+### `POST /v2/graph/search`
+
+Find entities by name (case-insensitive substring match), return matched nodes plus their direct neighborhood. Powers "find entity" search in a graph UI.
+
+Request body:
+
+```json
+{
+  "query": "foxmemory",
+  "user_id": "user@example.com",
+  "run_id": "session-123"
+}
+```
+
+- `query` required. `user_id` / `run_id` optional.
+- Matches up to 20 nodes whose `name` contains the query string.
+- Returns the full subgraph reachable from all matched nodes (direct neighbors + all edges between them).
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "nodes": [ ...GraphNode ],
+    "edges": [ ...GraphEdge ],
+    "matchCount": 3
+  }
+}
+```
+
+- `matchCount` — how many nodes directly matched the query (total `nodes` includes their neighbors).
+
+---
+
+### `GET /v2/graph/stats?user_id=&run_id=`
+
+Graph summary — entity type counts, relation type counts, and the 10 most-connected nodes. Good for a graph header panel or summary card.
+
+Query params: `user_id`, `run_id` (optional)
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "nodeCount": 72,
+    "edgeCount": 56,
+    "byLabel": { "unknown": 31, "technology": 6, "programmingelement": 4 },
+    "byRelationType": { "experienced": 8, "has_auth_state": 4, "involves": 3 },
+    "mostConnected": [
+      { "id": "4:abc123:0", "name": "neo4j", "degree": 14 }
+    ]
+  }
+}
+```
+
+- `degree` — total edge count (in + out) for that node.
+
+---
 
 ### `GET /v2/graph/relations?user_id=&run_id=&limit=`
 
-Returns raw Neo4j relation triples for a given user or session. Thin wrapper around `MemoryGraph.getAll()`.
+Raw Neo4j relation triples. Thin wrapper around `MemoryGraph.getAll()`. Use `GET /v2/graph` for graph rendering; use this for raw triple inspection or debugging entity extraction.
 
 Query params:
 - `user_id` or `run_id` (at least one required)
@@ -552,18 +707,13 @@ Success:
   "ok": true,
   "data": {
     "relations": [
-      { "source": "thomas", "relationship": "prefers", "destination": "concise_answers" },
-      { "source": "thomas", "relationship": "uses", "destination": "openclaw" }
+      { "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }
     ],
-    "count": 2
+    "count": 1
   },
   "meta": { "version": "v2" }
 }
 ```
-
-- Returns `400 BAD_REQUEST` when graph memory is not enabled.
-- Each item matches the `GraphRelation` schema: `{ source, relationship, destination }`.
-- Use this endpoint to inspect what the graph has learned, debug entity extraction, or build graph visualizations.
 
 ---
 
@@ -709,7 +859,12 @@ When graph memory is enabled:
 - `POST /v2/memories/search` responses include a `relations` array of `{ source, relationship, destination }` triples from the graph store alongside the vector `results`.
 - `GET /v2/health` diagnostics include `graphEnabled`, `neo4jUrl`, `graphLlmModel`, plus live connectivity fields: `neo4jConnected`, `neo4jNodeCount`, `neo4jRelationCount` (and `neo4jError` on failure).
 - Graph write events are recorded to the analytics DB (`graph_events` table). Stats visible in `GET /v2/stats/memories` → `graph` block.
-- `GET /v2/graph/relations?user_id=` — browse raw Neo4j triples for a user/session.
+- `GET /v2/graph?user_id=` — full node+edge graph for rendering (embeddings stripped).
+- `GET /v2/graph/nodes` — paginated entity list.
+- `GET /v2/graph/nodes/:id` — single node + direct neighborhood (click-to-explore).
+- `POST /v2/graph/search` — find entities by name substring + return subgraph.
+- `GET /v2/graph/stats` — entity type counts, relation type counts, most-connected nodes.
+- `GET /v2/graph/relations?user_id=` — raw Neo4j triples (debugging/triple inspection).
 - `GET/PUT /v2/config/graph-prompt` — runtime-configurable entity extraction prompt, persisted to SQLite.
 - `MEM0_GRAPH_CUSTOM_PROMPT` env var sets the initial graph prompt at startup.
 

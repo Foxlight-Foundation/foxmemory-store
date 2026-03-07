@@ -1688,6 +1688,288 @@ app.get("/v2/graph/relations", async (req, res) => {
   }
 });
 
+// ── graph explore ──────────────────────────────────────────────────────────
+
+const v2GraphQuerySchema = z.object({
+  user_id: z.string().trim().min(1).optional(),
+  run_id: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(1000).default(500),
+});
+
+const v2GraphNodesListSchema = z.object({
+  user_id: z.string().trim().min(1).optional(),
+  run_id: z.string().trim().min(1).optional(),
+  page: z.coerce.number().int().nonnegative().default(0),
+  page_size: z.coerce.number().int().positive().max(200).default(100),
+});
+
+const v2GraphSearchBodySchema = z.object({
+  query: z.string().trim().min(1),
+  user_id: z.string().trim().min(1).optional(),
+  run_id: z.string().trim().min(1).optional(),
+});
+
+const v2GraphStatsQuerySchema = z.object({
+  user_id: z.string().trim().min(1).optional(),
+  run_id: z.string().trim().min(1).optional(),
+});
+
+function neo4jInt(val: any): number {
+  if (val === null || val === undefined) return 0;
+  return typeof val?.toNumber === "function" ? val.toNumber() : Number(val);
+}
+
+function cleanNode(node: any): object {
+  const { embedding, ...props } = node.properties ?? {};
+  void embedding; // strip vector — too large and not useful for consumers
+  return {
+    id: node.elementId ?? String(node.identity),
+    labels: node.labels ?? [],
+    name: props.name ?? null,
+    properties: props,
+  };
+}
+
+function cleanEdge(rel: any, src?: string, tgt?: string): object {
+  const { created, created_at, updated_at, ...rest } = rel.properties ?? {};
+  return {
+    id: rel.elementId ?? String(rel.identity),
+    source: src ?? rel.startNodeElementId ?? String(rel.start),
+    target: tgt ?? rel.endNodeElementId ?? String(rel.end),
+    type: rel.type,
+    created: created ?? created_at ?? null,
+    properties: rest,
+  };
+}
+
+async function graphSession<T>(fn: (session: any) => Promise<T>): Promise<T> {
+  const driver = (memory as any).graphMemory?.graph;
+  if (!driver) throw new Error("Graph driver not initialized");
+  const session = driver.session();
+  try {
+    return await fn(session);
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
+// GET /v2/graph — full node+edge graph for a user/run (embeddings stripped)
+app.get("/v2/graph", async (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
+  const parsed = v2GraphQuerySchema.safeParse(req.query);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+  const { user_id, run_id, limit } = parsed.data;
+  const params = { user_id: user_id ?? null, run_id: run_id ?? null, limit };
+  try {
+    return await graphSession(async (session) => {
+      const nodeRes = await session.run(
+        `MATCH (n)
+         WHERE ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         RETURN n LIMIT $limit`,
+        params
+      );
+      const edgeRes = await session.run(
+        `MATCH (n)-[r]->(m)
+         WHERE ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         RETURN r LIMIT $edgeLimit`,
+        { ...params, edgeLimit: limit * 4 }
+      );
+      const nodes = nodeRes.records.map((rec: any) => cleanNode(rec.get("n")));
+      const edges = edgeRes.records.map((rec: any) => cleanEdge(rec.get("r")));
+      return v2Ok(res, { nodes, edges, meta: { nodeCount: nodes.length, edgeCount: edges.length } });
+    });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+// GET /v2/graph/nodes — paginated flat entity list
+app.get("/v2/graph/nodes", async (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
+  const parsed = v2GraphNodesListSchema.safeParse(req.query);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+  const { user_id, run_id, page, page_size } = parsed.data;
+  const params = { user_id: user_id ?? null, run_id: run_id ?? null, skip: page * page_size, limit: page_size };
+  try {
+    return await graphSession(async (session) => {
+      const result = await session.run(
+        `MATCH (n)
+         WHERE ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         RETURN n ORDER BY n.name SKIP $skip LIMIT $limit`,
+        params
+      );
+      const nodes = result.records.map((rec: any) => cleanNode(rec.get("n")));
+      return v2Ok(res, { nodes, page, page_size, count: nodes.length });
+    });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+// GET /v2/graph/nodes/:id — single node + full direct neighborhood
+app.get("/v2/graph/nodes/:id", async (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
+  try {
+    return await graphSession(async (session) => {
+      const nodeRes = await session.run(
+        "MATCH (n) WHERE elementId(n) = $id RETURN n",
+        { id: req.params.id }
+      );
+      if (!nodeRes.records.length) return v2Err(res, 404, "NOT_FOUND", "Node not found");
+
+      const neighborRes = await session.run(
+        `MATCH (n)-[r]-(m) WHERE elementId(n) = $id
+         RETURN r, m, elementId(startNode(r)) as src, elementId(endNode(r)) as tgt`,
+        { id: req.params.id }
+      );
+
+      const node = cleanNode(nodeRes.records[0].get("n"));
+      const neighborMap = new Map<string, object>();
+      const edgeMap = new Map<string, object>();
+
+      for (const rec of neighborRes.records) {
+        const m = rec.get("m");
+        const mid = m.elementId ?? String(m.identity);
+        if (!neighborMap.has(mid)) neighborMap.set(mid, cleanNode(m));
+        const r = rec.get("r");
+        const eid = r.elementId ?? String(r.identity);
+        if (!edgeMap.has(eid)) edgeMap.set(eid, cleanEdge(r, rec.get("src"), rec.get("tgt")));
+      }
+
+      return v2Ok(res, {
+        node,
+        neighbors: Array.from(neighborMap.values()),
+        edges: Array.from(edgeMap.values()),
+      });
+    });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+// POST /v2/graph/search — find entities by name, return with direct neighborhood
+app.post("/v2/graph/search", async (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
+  const parsed = v2GraphSearchBodySchema.safeParse(req.body);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid body", parsed.error.flatten());
+  const { query, user_id, run_id } = parsed.data;
+  const params = { query: query.toLowerCase(), user_id: user_id ?? null, run_id: run_id ?? null };
+  try {
+    return await graphSession(async (session) => {
+      const matchRes = await session.run(
+        `MATCH (n)
+         WHERE toLower(n.name) CONTAINS $query
+           AND ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         RETURN n LIMIT 20`,
+        params
+      );
+      if (!matchRes.records.length) return v2Ok(res, { nodes: [], edges: [], matchCount: 0 });
+
+      const matchIds = matchRes.records.map((rec: any) => {
+        const n = rec.get("n");
+        return n.elementId ?? String(n.identity);
+      });
+
+      // Expand to direct neighborhood of all matched nodes
+      const subgraphRes = await session.run(
+        `MATCH (n)-[r]->(m)
+         WHERE elementId(n) IN $ids OR elementId(m) IN $ids
+         RETURN n, r, m, elementId(startNode(r)) as src, elementId(endNode(r)) as tgt`,
+        { ids: matchIds }
+      );
+
+      const nodeMap = new Map<string, object>();
+      const edgeMap = new Map<string, object>();
+
+      for (const rec of matchRes.records) {
+        const n = rec.get("n");
+        nodeMap.set(n.elementId ?? String(n.identity), cleanNode(n));
+      }
+      for (const rec of subgraphRes.records) {
+        for (const field of ["n", "m"]) {
+          const node = rec.get(field);
+          const nid = node.elementId ?? String(node.identity);
+          if (!nodeMap.has(nid)) nodeMap.set(nid, cleanNode(node));
+        }
+        const r = rec.get("r");
+        const eid = r.elementId ?? String(r.identity);
+        if (!edgeMap.has(eid)) edgeMap.set(eid, cleanEdge(r, rec.get("src"), rec.get("tgt")));
+      }
+
+      return v2Ok(res, {
+        nodes: Array.from(nodeMap.values()),
+        edges: Array.from(edgeMap.values()),
+        matchCount: matchIds.length,
+      });
+    });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+// GET /v2/graph/stats — label counts, relation type counts, most-connected nodes
+app.get("/v2/graph/stats", async (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
+  const parsed = v2GraphStatsQuerySchema.safeParse(req.query);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+  const { user_id, run_id } = parsed.data;
+  const params = { user_id: user_id ?? null, run_id: run_id ?? null };
+  try {
+    return await graphSession(async (session) => {
+      const byLabelRes = await session.run(
+        `MATCH (n)
+         WHERE ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         RETURN labels(n)[0] as label, count(*) as count ORDER BY count DESC`,
+        params
+      );
+      const byTypeRes = await session.run(
+        `MATCH (n)-[r]->(m)
+         WHERE ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         RETURN type(r) as type, count(*) as count ORDER BY count DESC`,
+        params
+      );
+      const mostConnectedRes = await session.run(
+        `MATCH (n)-[r]-(m)
+         WHERE ($user_id IS NULL OR n.user_id = $user_id)
+           AND ($run_id IS NULL OR n.run_id = $run_id)
+         WITH n, count(r) as degree ORDER BY degree DESC LIMIT 10
+         RETURN elementId(n) as id, n.name as name, degree`,
+        params
+      );
+
+      const byLabel: Record<string, number> = {};
+      for (const rec of byLabelRes.records) {
+        byLabel[String(rec.get("label") ?? "unknown")] = neo4jInt(rec.get("count"));
+      }
+      const byRelationType: Record<string, number> = {};
+      for (const rec of byTypeRes.records) {
+        byRelationType[String(rec.get("type"))] = neo4jInt(rec.get("count"));
+      }
+      const mostConnected = mostConnectedRes.records.map((rec: any) => ({
+        id: rec.get("id"),
+        name: rec.get("name"),
+        degree: neo4jInt(rec.get("degree")),
+      }));
+
+      return v2Ok(res, {
+        nodeCount: Object.values(byLabel).reduce((a, b) => a + b, 0),
+        edgeCount: Object.values(byRelationType).reduce((a, b) => a + b, 0),
+        byLabel,
+        byRelationType,
+        mostConnected,
+      });
+    });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
 // ── graph-prompt config ────────────────────────────────────────────────────
 
 app.get("/v2/config/graph-prompt", (_req, res) => {
@@ -1794,6 +2076,28 @@ const V2_OPENAPI_SPEC = {
           source: { type: "string" },
           relationship: { type: "string" },
           destination: { type: "string" },
+        },
+      },
+      GraphNode: {
+        type: "object",
+        description: "A Neo4j entity node. Embedding vectors are always stripped.",
+        properties: {
+          id: { type: "string", description: "Neo4j elementId (e.g. '4:abc123:0'). Use as :id in GET /graph/nodes/:id." },
+          labels: { type: "array", items: { type: "string" }, description: "Neo4j labels assigned by mem0 entity extraction (e.g. 'person', 'technology')." },
+          name: { type: "string", nullable: true, description: "Entity name — primary display value." },
+          properties: { type: "object", description: "All node properties except embedding. Includes user_id, created, and any entity-specific fields." },
+        },
+      },
+      GraphEdge: {
+        type: "object",
+        description: "A directed Neo4j relationship between two entity nodes.",
+        properties: {
+          id: { type: "string", description: "Neo4j elementId of the relationship." },
+          source: { type: "string", description: "elementId of the start node." },
+          target: { type: "string", description: "elementId of the end node." },
+          type: { type: "string", description: "Relationship type as free-form natural language (e.g. 'WORKS_AT', 'experienced')." },
+          created: { type: "string", nullable: true, description: "ISO timestamp when the relationship was created. Normalized from 'created' or 'created_at'." },
+          properties: { type: "object", description: "Additional relationship properties (typically empty)." },
         },
       },
       SearchResponse: {
@@ -2009,9 +2313,87 @@ const V2_OPENAPI_SPEC = {
         responses: { "200": { description: "Updated prompt" }, "400": { description: "Validation error or graph not enabled" } },
       },
     },
+    "/graph": {
+      get: {
+        summary: "Full node+edge graph for a user/run — primary endpoint for graph rendering. Graph-enabled only.",
+        operationId: "v2Graph",
+        parameters: [
+          { name: "user_id", in: "query", schema: { type: "string" } },
+          { name: "run_id", in: "query", schema: { type: "string" } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 1000, default: 500 }, description: "Max nodes returned. Edges fetched at limit*4." },
+        ],
+        responses: {
+          "200": { description: "nodes + edges shaped for react-force-graph or equivalent", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { nodes: { type: "array", items: { $ref: "#/components/schemas/GraphNode" } }, edges: { type: "array", items: { $ref: "#/components/schemas/GraphEdge" } }, meta: { type: "object", properties: { nodeCount: { type: "integer" }, edgeCount: { type: "integer" } } } } } } }] } } } },
+          "400": { description: "Graph not enabled" },
+          "500": { description: "Internal error" },
+        },
+      },
+    },
+    "/graph/nodes": {
+      get: {
+        summary: "Paginated flat entity list — for sidebars or search-before-render flows. Graph-enabled only.",
+        operationId: "v2GraphNodes",
+        parameters: [
+          { name: "user_id", in: "query", schema: { type: "string" } },
+          { name: "run_id", in: "query", schema: { type: "string" } },
+          { name: "page", in: "query", schema: { type: "integer", minimum: 0, default: 0 } },
+          { name: "page_size", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 100 } },
+        ],
+        responses: {
+          "200": { description: "Paginated node list", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { nodes: { type: "array", items: { $ref: "#/components/schemas/GraphNode" } }, page: { type: "integer" }, page_size: { type: "integer" }, count: { type: "integer" } } } } }] } } } },
+          "400": { description: "Graph not enabled or validation error" },
+        },
+      },
+    },
+    "/graph/nodes/{id}": {
+      get: {
+        summary: "Single node + full direct neighborhood. Powers click-to-explore. Graph-enabled only.",
+        operationId: "v2GraphNodeDetail",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" }, description: "Neo4j elementId (e.g. '4:abc123:0'), returned in all node objects." },
+        ],
+        responses: {
+          "200": { description: "Node + neighbors + connecting edges", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { node: { $ref: "#/components/schemas/GraphNode" }, neighbors: { type: "array", items: { $ref: "#/components/schemas/GraphNode" } }, edges: { type: "array", items: { $ref: "#/components/schemas/GraphEdge" } } } } } }] } } } },
+          "400": { description: "Graph not enabled" },
+          "404": { description: "Node not found" },
+          "500": { description: "Internal error" },
+        },
+      },
+    },
+    "/graph/search": {
+      post: {
+        summary: "Find entities by name (substring match) + return their direct neighborhood. Graph-enabled only.",
+        operationId: "v2GraphSearch",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["query"], properties: {
+          query: { type: "string", description: "Case-insensitive substring matched against node names." },
+          user_id: { type: "string" },
+          run_id: { type: "string" },
+        } } } } },
+        responses: {
+          "200": { description: "Matched nodes + neighborhood subgraph", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { nodes: { type: "array", items: { $ref: "#/components/schemas/GraphNode" } }, edges: { type: "array", items: { $ref: "#/components/schemas/GraphEdge" } }, matchCount: { type: "integer", description: "Number of nodes directly matching the query (total nodes includes their neighbors)." } } } } }] } } } },
+          "400": { description: "Validation error or graph not enabled" },
+          "500": { description: "Internal error" },
+        },
+      },
+    },
+    "/graph/stats": {
+      get: {
+        summary: "Graph summary — entity type counts, relation type counts, most-connected nodes. Graph-enabled only.",
+        operationId: "v2GraphStats",
+        parameters: [
+          { name: "user_id", in: "query", schema: { type: "string" } },
+          { name: "run_id", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "Graph summary stats", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { nodeCount: { type: "integer" }, edgeCount: { type: "integer" }, byLabel: { type: "object", description: "Node count keyed by entity label (e.g. { person: 12, technology: 6 })." }, byRelationType: { type: "object", description: "Edge count keyed by relation type." }, mostConnected: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, degree: { type: "integer" } } }, description: "Top 10 most-connected nodes by total edge count." } } } } }] } } } },
+          "400": { description: "Graph not enabled or validation error" },
+          "500": { description: "Internal error" },
+        },
+      },
+    },
     "/graph/relations": {
       get: {
-        summary: "Browse raw Neo4j relations for a user/session. Only available when graph enabled.",
+        summary: "Browse raw Neo4j relation triples. Use GET /graph for graph rendering. Graph-enabled only.",
         operationId: "v2GraphRelations",
         parameters: [
           { name: "user_id", in: "query", schema: { type: "string" } },
