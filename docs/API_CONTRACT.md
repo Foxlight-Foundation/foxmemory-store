@@ -128,10 +128,14 @@ Success response:
     "attempts": 3,
     "infer": { "resultCount": 1 },
     "fallback": { "resultCount": 0 },
-    "result": { "results": [] }
+    "result": { "results": [] },
+    "relations": [{ "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }]
   }
 }
 ```
+
+- `relations` is only present when graph memory is enabled. Contains graph triples added/identified by this write call.
+- When graph is disabled, `relations` is omitted entirely (not `null` or `[]`).
 
 Idempotency:
 - Key sources:
@@ -385,7 +389,7 @@ Returns the current Call 1 prompt (fact extraction — what memories to extract 
 
 - `prompt: null` means the mem0 default is active.
 - `effective_prompt`: always the full text of the prompt currently in use (custom or default).
-- `source`: `"default"` | `"env"` | `"db"`
+- `source`: `"default"` | `"env"` | `"persisted"` | `"api"`
 
 ### `PUT /v2/config/prompt`
 
@@ -419,9 +423,66 @@ Request body:
 - `prompt: null` resets to the mem0 default.
 - The static preamble is replaced; the dynamic section (existing memories + new facts + output format) is always appended automatically.
 
+### `GET /v2/config/graph-prompt` _(graph-enabled only)_
+
+Returns the current graph entity extraction prompt (Call 3). When set, this is injected as an additional rule into `EXTRACT_RELATIONS_PROMPT` in the mem0 fork.
+
+```json
+{ "ok": true, "data": { "prompt": null, "source": "default", "persisted": true } }
+```
+
+- `prompt: null` means the built-in `EXTRACT_RELATIONS_PROMPT` default is active.
+- `source`: `"default"` | `"env"` | `"persisted"` | `"api"`
+- Returns `400 BAD_REQUEST` when graph memory is not enabled.
+
+### `PUT /v2/config/graph-prompt` _(graph-enabled only)_
+
+Set or clear the graph prompt.
+
+Request body:
+```json
+{ "prompt": "Always extract the user's name as a node labeled 'Person'." }
+```
+
+- `prompt: null` resets to the EXTRACT_RELATIONS_PROMPT default.
+- Persisted to SQLite and survives restarts.
+- Returns `400 BAD_REQUEST` when graph memory is not enabled.
+
 ---
 
-## 2.10 OpenAPI Spec
+## 2.10 Graph Relations Browse _(graph-enabled only)_
+
+### `GET /v2/graph/relations?user_id=&run_id=&limit=`
+
+Returns raw Neo4j relation triples for a given user or session. Thin wrapper around `MemoryGraph.getAll()`.
+
+Query params:
+- `user_id` or `run_id` (at least one required)
+- `limit` — default 100, max 1000
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "relations": [
+      { "source": "thomas", "relationship": "prefers", "destination": "concise_answers" },
+      { "source": "thomas", "relationship": "uses", "destination": "openclaw" }
+    ],
+    "count": 2
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+- Returns `400 BAD_REQUEST` when graph memory is not enabled.
+- Each item matches the `GraphRelation` schema: `{ source, relationship, destination }`.
+- Use this endpoint to inspect what the graph has learned, debug entity extraction, or build graph visualizations.
+
+---
+
+## 2.11 OpenAPI Spec
 
 ### `GET /v2/openapi.json`
 
@@ -539,12 +600,16 @@ Common v2 titles:
   - `NEO4J_URL` — Bolt URL, e.g. `bolt://neo4j:7687`. Graph memory is **disabled** unless this is set.
   - `NEO4J_USERNAME` — default: `neo4j`
   - `NEO4J_PASSWORD` — required when `NEO4J_URL` is set
-  - `MEM0_GRAPH_LLM_MODEL` — optional separate model for entity/relation extraction. Defaults to `MEM0_LLM_MODEL`. Recommended: `gpt-4o-mini` (hosted) or `Qwen2.5-14B-Instruct` / `Mistral-Small-3.1` (local).
+  - `MEM0_GRAPH_LLM_MODEL` — optional separate model for entity/relation extraction. Defaults to `MEM0_LLM_MODEL`. Recommended: `gpt-4.1-mini` (hosted) or `Qwen2.5-14B-Instruct` / `Mistral-Small-3.1` (local).
 
 When graph memory is enabled:
-- Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment).
+- Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment). Write responses include a top-level `relations` array (graph triples added by this call).
 - `POST /v2/memories/search` responses include a `relations` array of `{ source, relationship, destination }` triples from the graph store alongside the vector `results`.
-- `GET /v2/health` diagnostics include `graphEnabled`, `neo4jUrl`, and `graphLlmModel`.
+- `GET /v2/health` diagnostics include `graphEnabled`, `neo4jUrl`, `graphLlmModel`, plus live connectivity fields: `neo4jConnected`, `neo4jNodeCount`, `neo4jRelationCount` (and `neo4jError` on failure).
+- Graph write events are recorded to the analytics DB (`graph_events` table). Stats visible in `GET /v2/stats/memories` → `graph` block.
+- `GET /v2/graph/relations?user_id=` — browse raw Neo4j triples for a user/session.
+- `GET/PUT /v2/config/graph-prompt` — runtime-configurable entity extraction prompt, persisted to SQLite.
+- `MEM0_GRAPH_CUSTOM_PROMPT` env var sets the initial graph prompt at startup.
 
 Recommended production checks:
 1. `GET /health` or `GET /v2/health`

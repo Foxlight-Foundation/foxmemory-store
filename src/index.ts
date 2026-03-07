@@ -131,7 +131,13 @@ let currentCustomPrompt: string | null =
 let currentCustomUpdatePrompt: string | null =
   process.env.MEM0_CUSTOM_UPDATE_PROMPT || null;
 
-function createMemory(customPrompt?: string | null, customUpdatePrompt?: string | null) {
+// Runtime-configurable graph entity extraction prompt. null = use mem0 default EXTRACT_RELATIONS_PROMPT.
+// Set via PUT /v2/config/graph-prompt. Injected as graphStore.customPrompt in createMemory().
+// Only has effect when GRAPH_ENABLED=true.
+let currentCustomGraphPrompt: string | null =
+  process.env.MEM0_GRAPH_CUSTOM_PROMPT || null;
+
+function createMemory(customPrompt?: string | null, customUpdatePrompt?: string | null, customGraphPrompt?: string | null) {
   return new Memory({
     version: "v1.1",
     historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
@@ -176,6 +182,9 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
               username: NEO4J_USERNAME,
               password: NEO4J_PASSWORD!,
             },
+            // Optional custom prompt for entity/relation extraction (Call 3).
+            // Injected as rule #4 into EXTRACT_RELATIONS_PROMPT in the fork.
+            ...(customGraphPrompt ? { customPrompt: customGraphPrompt } : {}),
             // Optional separate LLM for graph entity/relation extraction.
             // Defaults to the main LLM_MODEL if MEM0_GRAPH_LLM_MODEL is not set.
             ...(GRAPH_LLM_MODEL !== LLM_MODEL
@@ -196,7 +205,7 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
   });
 }
 
-let memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
+let memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
 
 const requireScopeSchema = z
   .object({
@@ -699,7 +708,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
         mode: "inferred",
         attempts: ADD_RETRIES,
         infer: { resultCount: inferResult.results.length },
-        result: inferResult
+        result: inferResult,
+        ...(GRAPH_ENABLED ? { relations: inferResult.relations || [] } : {}),
       };
     }
   }
@@ -711,7 +721,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
       mode: "none",
       attempts: inferPreferred ? ADD_RETRIES : 0,
       infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
-      result: inferResult
+      result: inferResult,
+      ...(GRAPH_ENABLED ? { relations: inferResult?.relations || [] } : {}),
     };
   }
 
@@ -735,7 +746,8 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
     attempts: inferPreferred ? ADD_RETRIES : 0,
     infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
     fallback: { resultCount: Array.isArray(rawResult?.results) ? rawResult.results.length : 0 },
-    result: rawResult
+    result: rawResult,
+    ...(GRAPH_ENABLED ? { relations: rawResult?.relations || [] } : {}),
   };
 }
 
@@ -751,12 +763,24 @@ app.post("/v2/memory.write", async (req, res) => {
     runtimeStats.requests.add += 1;
     const t0 = Date.now();
     const out = await v2Write(parsed.data);
+    const latencyMs = Date.now() - t0;
     analyticsDb?.recordWriteResults({
       results: out.result?.results || [],
       inputChars: inputCharsFromBody(parsed.data),
-      latencyMs: Date.now() - t0,
+      latencyMs,
       inferMode: parsed.data.infer_preferred !== false,
     });
+    if (GRAPH_ENABLED) {
+      const graphRelations: any[] = (out as any).relations || [];
+      const addedEntities: any[] = out.result?.added_entities || [];
+      analyticsDb?.recordGraphWrite({
+        user_id: parsed.data.user_id,
+        run_id: parsed.data.run_id,
+        entitiesAdded: addedEntities.length,
+        relationsAdded: graphRelations.length,
+        latencyMs,
+      });
+    }
     const body = { ok: true, data: out };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
@@ -778,12 +802,24 @@ app.post("/v2/memories", async (req, res) => {
     runtimeStats.requests.add += 1;
     const t0 = Date.now();
     const out = await v2Write(parsed.data);
+    const latencyMs = Date.now() - t0;
     analyticsDb?.recordWriteResults({
       results: out.result?.results || [],
       inputChars: inputCharsFromBody(parsed.data),
-      latencyMs: Date.now() - t0,
+      latencyMs,
       inferMode: parsed.data.infer_preferred !== false,
     });
+    if (GRAPH_ENABLED) {
+      const graphRelations: any[] = (out as any).relations || [];
+      const addedEntities: any[] = out.result?.added_entities || [];
+      analyticsDb?.recordGraphWrite({
+        user_id: parsed.data.user_id,
+        run_id: parsed.data.run_id,
+        entitiesAdded: addedEntities.length,
+        relationsAdded: graphRelations.length,
+        latencyMs,
+      });
+    }
     const body = { ok: true, data: out };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
@@ -970,6 +1006,37 @@ app.delete("/v2/memories/:id", async (req, res) => {
   }
 });
 
+// ── Neo4j health check (reuses the driver held by the MemoryGraph instance) ─
+
+async function checkNeo4jHealth(): Promise<{
+  connected: boolean;
+  nodeCount: number | null;
+  relationCount: number | null;
+  error?: string;
+} | null> {
+  if (!GRAPH_ENABLED) return null;
+  const driver = (memory as any).graph?.driver;
+  if (!driver) return { connected: false, nodeCount: null, relationCount: null, error: "graph driver not initialized" };
+
+  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+
+  const session = driver.session();
+  try {
+    const nodeRes = await withTimeout(session.run("MATCH (n) RETURN count(n) AS c"), 3000);
+    const relRes = await withTimeout(session.run("MATCH ()-[r]->() RETURN count(r) AS c"), 3000);
+    const toNum = (r: any) => {
+      const val = r.records?.[0]?.get("c");
+      return typeof val?.toNumber === "function" ? val.toNumber() : (Number(val) || 0);
+    };
+    return { connected: true, nodeCount: toNum(nodeRes), relationCount: toNum(relRes) };
+  } catch (e: any) {
+    return { connected: false, nodeCount: null, relationCount: null, error: String(e?.message || e).slice(0, 150) };
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
 // ── v2 config (runtime tunables) ──────────────────────────────────────────
 
 app.get("/v2/config/prompt", (_req, res) => {
@@ -1000,7 +1067,7 @@ app.put("/v2/config/prompt", (req, res) => {
   }
   const newPrompt = parsed.data.prompt;
   currentCustomPrompt = newPrompt;
-  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
   analyticsDb?.setConfig("custom_prompt", newPrompt);
   console.log(`[config] custom prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to default"}`);
   return v2Ok(res, {
@@ -1034,7 +1101,7 @@ app.put("/v2/config/update-prompt", (req, res) => {
   }
   const newPrompt = parsed.data.prompt;
   currentCustomUpdatePrompt = newPrompt;
-  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
   analyticsDb?.setConfig("custom_update_prompt", newPrompt);
   console.log(`[config] custom update prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to default"}`);
   return v2Ok(res, {
@@ -1046,7 +1113,8 @@ app.put("/v2/config/update-prompt", (req, res) => {
 
 // ── v2 observability & analytics ──────────────────────────────────────────
 
-app.get("/v2/health", (_req, res) => {
+app.get("/v2/health", async (_req, res) => {
+  const neo4j = await checkNeo4jHealth();
   return v2Ok(res, {
     service: "foxmemory-store",
     runtime: "node-ts",
@@ -1062,6 +1130,10 @@ app.get("/v2/health", (_req, res) => {
       graphEnabled: GRAPH_ENABLED,
       neo4jUrl: NEO4J_URL,
       graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
+      neo4jConnected: neo4j?.connected ?? null,
+      neo4jNodeCount: neo4j?.nodeCount ?? null,
+      neo4jRelationCount: neo4j?.relationCount ?? null,
+      ...(neo4j?.error ? { neo4jError: neo4j.error } : {}),
     },
   }, { version: "v2" });
 });
@@ -1404,8 +1476,13 @@ try {
     currentCustomUpdatePrompt = persistedUpdate;
     console.log("[config] restored custom update prompt from DB");
   }
-  if (persisted !== null || persistedUpdate !== null) {
-    memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt);
+  const persistedGraph = analyticsDb.getConfig("custom_graph_prompt");
+  if (persistedGraph !== null) {
+    currentCustomGraphPrompt = persistedGraph;
+    console.log("[config] restored custom graph prompt from DB");
+  }
+  if (persisted !== null || persistedUpdate !== null || persistedGraph !== null) {
+    memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
   }
 } catch (e) {
   console.warn("[analytics] DB unavailable (set FOXMEMORY_ANALYTICS_DB_PATH to a writable path):", String(e));
@@ -1452,6 +1529,76 @@ app.get("/v2/stats/memories", (req, res) => {
   }
 
   return v2Ok(res, { ...stats, window }, { version: "v2" });
+});
+
+// ── graph relations browse ─────────────────────────────────────────────────
+
+const v2GraphRelationsSchema = z
+  .object({
+    user_id: z.string().trim().min(1).optional(),
+    run_id: z.string().trim().min(1).optional(),
+    limit: z.coerce.number().int().positive().max(1000).optional(),
+  })
+  .refine((v) => Boolean(v.user_id || v.run_id), {
+    message: "One of user_id or run_id is required",
+  });
+
+app.get("/v2/graph/relations", async (req, res) => {
+  if (!GRAPH_ENABLED) {
+    return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
+  }
+  const parsed = v2GraphRelationsSchema.safeParse(req.query);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
+
+  try {
+    const graphStore = (memory as any).graph;
+    if (!graphStore) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Graph store not initialized");
+
+    const filters: any = {};
+    if (parsed.data.user_id) filters.userId = parsed.data.user_id;
+    if (parsed.data.run_id) filters.runId = parsed.data.run_id;
+
+    const relations = await graphStore.getAll(filters, parsed.data.limit ?? 100);
+    const list = Array.isArray(relations) ? relations : [];
+    return v2Ok(res, { relations: list, count: list.length }, { version: "v2" });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
+// ── graph-prompt config ────────────────────────────────────────────────────
+
+app.get("/v2/config/graph-prompt", (_req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
+  const dbPrompt = analyticsDb?.getConfig("custom_graph_prompt") ?? null;
+  const source = currentCustomGraphPrompt
+    ? dbPrompt !== null
+      ? "persisted"
+      : process.env.MEM0_GRAPH_CUSTOM_PROMPT === currentCustomGraphPrompt
+        ? "env"
+        : "api"
+    : "default";
+  return v2Ok(res, {
+    prompt: currentCustomGraphPrompt,
+    source,
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+app.put("/v2/config/graph-prompt", (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
+  const parsed = v2PromptSchema.safeParse(req.body);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  const newPrompt = parsed.data.prompt;
+  currentCustomGraphPrompt = newPrompt;
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  analyticsDb?.setConfig("custom_graph_prompt", newPrompt);
+  console.log(`[config] custom graph prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to default"}`);
+  return v2Ok(res, {
+    prompt: currentCustomGraphPrompt,
+    source: currentCustomGraphPrompt ? "api" : "default",
+    persisted: analyticsDb?.ready ?? false,
+  });
 });
 
 // ── batch delete ───────────────────────────────────────────────────────────
@@ -1547,6 +1694,10 @@ const V2_OPENAPI_SPEC = {
           graphEnabled: { type: "boolean", description: "True when NEO4J_URL + NEO4J_PASSWORD are set." },
           neo4jUrl: { type: "string", nullable: true },
           graphLlmModel: { type: "string", nullable: true },
+          neo4jConnected: { type: "boolean", nullable: true, description: "Live Neo4j connectivity check result. null when graph disabled." },
+          neo4jNodeCount: { type: "integer", nullable: true, description: "Total nodes in Neo4j. null when graph disabled or unreachable." },
+          neo4jRelationCount: { type: "integer", nullable: true, description: "Total relations in Neo4j. null when graph disabled or unreachable." },
+          neo4jError: { type: "string", description: "Error message from Neo4j health check, if any." },
         },
       },
       StatsMemoriesSummary: {
@@ -1608,7 +1759,17 @@ const V2_OPENAPI_SPEC = {
           infer_preferred: { type: "boolean" }, fallback_raw: { type: "boolean" },
           idempotency_key: { type: "string" },
         } } } } },
-        responses: { "200": { description: "Write result" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
+        responses: {
+          "200": { description: "Write result", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: {
+            mode: { type: "string", enum: ["inferred", "fallback_raw", "none"] },
+            attempts: { type: "integer" },
+            infer: { type: "object", properties: { resultCount: { type: "integer" } } },
+            result: { type: "object" },
+            relations: { type: "array", items: { $ref: "#/components/schemas/GraphRelation" }, description: "Graph triples added by this write. Only present when graph memory is enabled." },
+          } } } }] } } } },
+          "400": { description: "Validation error" },
+          "409": { description: "Idempotency conflict" },
+        },
       },
       get: {
         summary: "List memories",
@@ -1672,6 +1833,31 @@ const V2_OPENAPI_SPEC = {
         operationId: "v2SetUpdatePrompt",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["prompt"], properties: { prompt: { type: "string", nullable: true } } } } } },
         responses: { "200": { description: "Updated prompt" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/config/graph-prompt": {
+      get: { summary: "Get custom graph entity extraction prompt (Call 3). Only available when graph enabled.", operationId: "v2GetGraphPrompt", responses: { "200": { description: "{ prompt: string|null, source: string, persisted: boolean }" }, "400": { description: "Graph not enabled" } } },
+      put: {
+        summary: "Set graph entity extraction prompt — persisted across restarts. null resets to EXTRACT_RELATIONS_PROMPT default.",
+        operationId: "v2SetGraphPrompt",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["prompt"], properties: { prompt: { type: "string", nullable: true } } } } } },
+        responses: { "200": { description: "Updated prompt" }, "400": { description: "Validation error or graph not enabled" } },
+      },
+    },
+    "/graph/relations": {
+      get: {
+        summary: "Browse raw Neo4j relations for a user/session. Only available when graph enabled.",
+        operationId: "v2GraphRelations",
+        parameters: [
+          { name: "user_id", in: "query", schema: { type: "string" } },
+          { name: "run_id", in: "query", schema: { type: "string" } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 1000, default: 100 } },
+        ],
+        responses: {
+          "200": { description: "{ relations: GraphRelation[], count: number }", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { relations: { type: "array", items: { $ref: "#/components/schemas/GraphRelation" } }, count: { type: "integer" } } } } }] } } } },
+          "400": { description: "Validation error or graph not enabled" },
+          "500": { description: "Internal error" },
+        },
       },
     },
     "/memory.write": {

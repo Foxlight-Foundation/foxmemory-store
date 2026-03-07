@@ -10,10 +10,13 @@ Most AI apps are stateless by default. This service adds long-term memory so you
 
 ## What it does
 
-- Accepts memory writes (messages, metadata, user IDs)
+- Accepts memory writes (messages, metadata, user IDs) — infer-first with deterministic fallback
 - Supports semantic search over prior memories
-- Provides read/delete endpoints
-- Uses Mem0 OSS under the hood
+- Optional **graph memory** (Neo4j) — automatically extracts entities and relations on every write; surfaces them on search
+- Full **analytics DB** (SQLite) — persists write/search/graph event history across restarts; powers the `/v2/stats/memories` dashboard endpoint
+- Runtime-configurable LLM prompts (Call 1, 2, and graph extraction) — persisted and survives restarts
+- Provides read, update, delete, and batch-delete endpoints
+- Uses Mem0 OSS under the hood (`@foxlight-foundation/mem0ai` fork)
 - Can point to local inference (`foxmemory-infer`) or external OpenAI-compatible inference
 
 ## Architecture in plain English
@@ -67,38 +70,61 @@ curl -s http://localhost:8082/health | jq .
 - `QDRANT_API_KEY` (optional)
 - `QDRANT_COLLECTION` (default `foxmemory`)
 
-### Local history DB
+### Analytics DB
 
-- `MEM0_HISTORY_DB_PATH` (default `/tmp/history.db`)
+- `FOXMEMORY_ANALYTICS_DB_PATH` — default `/data/foxmemory-analytics.db`. **Must be on a mounted volume** or stats reset on restart. On R720 use `/qdrant/storage/foxmemory-analytics.db`.
+
+### Graph memory (Neo4j — optional)
+
+Leave unset to disable. When set, enables entity/relation extraction on every write and graph search on every query.
+
+- `NEO4J_URL` — e.g. `bolt://neo4j:7687`
+- `NEO4J_USERNAME` — default `neo4j`
+- `NEO4J_PASSWORD`
+- `MEM0_GRAPH_LLM_MODEL` — default `gpt-4.1-mini`. Separate model for entity extraction; keeps main model fast.
+
+### Local history DB (ephemeral)
+
+- `MEM0_HISTORY_DB_PATH` — default `/tmp/history.db` (Mem0-internal, not analytics)
 
 ---
 
 ## API endpoints
 
+Health & observability:
+
+- `GET /health`, `GET /health.version`
+- `GET /v2/health` — same but normalized envelope + **live Neo4j connectivity check**
+- `GET /v2/stats` — runtime counters
+- `GET /v2/stats/memories` — SQLite analytics (byDay charts, NONE rate, search quality, graph stats)
+- `GET /v2/openapi.json` — machine-readable OpenAPI 3.0 spec
+
 Primary (v2):
 
-- `POST /v2/memory.write`
-- `POST /v2/memories`
-- `POST /v2/memories/search`
-- `GET /v2/memories`
-- `POST /v2/memories/list`
+- `POST /v2/memories` — write (infer-first with deterministic fallback; returns `relations[]` when graph enabled)
+- `POST /v2/memories/search` — semantic search (returns `relations[]` when graph enabled)
+- `POST /v2/memories/forget` — batch delete up to 1000 memories by ID
+- `GET /v2/memories` — list
+- `POST /v2/memories/list` — list (body-based, supports OR filters)
 - `GET /v2/memories/:id`
 - `PUT /v2/memories/:id`
 - `DELETE /v2/memories/:id`
+- `GET /v2/graph/relations` — browse raw Neo4j triples for a user/session _(graph-enabled only)_
 
-Compatibility (v1):
+Config:
 
-- `POST /v1/memories`
-- `POST /v1/memories/search`
-- `GET /v1/memories/:id`
-- `GET /v1/memories?user_id=...&run_id=...`
-- `DELETE /v1/memories/:id`
+- `GET/PUT /v2/config/prompt` — Call 1 (fact extraction) prompt
+- `GET/PUT /v2/config/update-prompt` — Call 2 (ADD/UPDATE/DELETE/NONE) prompt
+- `GET/PUT /v2/config/graph-prompt` — graph entity extraction prompt _(graph-enabled only)_
+
+Compatibility (v1 — frozen):
+
+- `POST /v1/memories`, `POST /v1/memories/search`
+- `GET /v1/memories/:id`, `GET /v1/memories`, `DELETE /v1/memories/:id`
 
 Back-compat aliases:
 
-- `POST /memory.write`
-- `POST /memory.search`
-- `POST /memory.raw_write`
+- `POST /memory.write`, `POST /memory.search`, `POST /memory.raw_write`
 
 Detailed request/response contract: `docs/API_CONTRACT.md`
 
@@ -129,14 +155,15 @@ curl -s -X POST http://localhost:8082/v1/memories/search \
 
 ## Docker notes
 
-This repo includes an image that can run an embedded Qdrant process in the same container.
+This repo includes an image that bundles an embedded Qdrant binary (tech debt — separate container planned). Multi-stage build: build tools (`python3/make/g++`) are stripped from the runtime image.
 
 If startup issues occur, check:
 
 1. Qdrant reachability (`QDRANT_HOST/QDRANT_PORT`)
 2. Inference API URL correctness (`OPENAI_BASE_URL`)
 3. API key wiring (`OPENAI_API_KEY`)
-4. Writable history DB path (`MEM0_HISTORY_DB_PATH`)
+4. Analytics DB path on a mounted volume (`FOXMEMORY_ANALYTICS_DB_PATH`)
+5. Neo4j bolt URL and password (`NEO4J_URL`, `NEO4J_PASSWORD`) — `GET /v2/health` shows `neo4jConnected`
 
 ---
 
