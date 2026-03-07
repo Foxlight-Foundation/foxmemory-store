@@ -182,6 +182,7 @@ Success:
 ```
 
 - `relations` is only present when graph memory is enabled (`NEO4J_URL` configured). Each entry is a `{ source, relationship, destination }` triple.
+- Each search is recorded to the analytics DB. `graph_hit` is set to `true` when `relations.length > 0`, powering `searches.graphHitRatePct` in `/v2/stats/memories`.
 
 ## 2.3 List
 
@@ -298,10 +299,10 @@ Notes:
 
 ### `GET /v2/stats/memories?days=30`
 
-Rich analytics from the mem0 SQLite history DB. Designed for dashboard bar charts and activity feeds.
+Rich analytics from the foxmemory-store SQLite analytics DB. Designed for dashboard bar charts, activity feeds, and search quality monitoring.
 
 Query params:
-- `days` (default: 30, max: 365) — lookback window for `byDay` and `recentActivity`.
+- `days` (default: 30, max: 365) — lookback window for `byDay`, `searches.byDay`, and `recentActivity`.
 
 Success:
 
@@ -310,40 +311,64 @@ Success:
   "ok": true,
   "data": {
     "summary": {
-      "total": 142,
-      "active": 138,
-      "deleted": 4,
-      "byEvent": {
-        "ADD": 98,
-        "UPDATE": 44,
-        "DELETE": 4,
-        "NONE": 0
-      }
+      "totalCalls": 142,
+      "byEvent": { "ADD": 98, "UPDATE": 44, "DELETE": 4, "NONE": 12 },
+      "noneRatePct": 8,
+      "writeLatency": { "avgMs": 1240, "minMs": 800, "maxMs": 4200 },
+      "model": { "llm": "gpt-4.1-nano", "embed": "text-embedding-3-small" }
     },
     "byDay": [
-      { "date": "2026-03-01", "ADD": 5, "UPDATE": 2, "DELETE": 0 },
-      { "date": "2026-03-02", "ADD": 3, "UPDATE": 1, "DELETE": 1 }
+      { "date": "2026-03-01", "ADD": 5, "UPDATE": 2, "DELETE": 0, "NONE": 1, "avgLatencyMs": 1100 }
     ],
     "recentActivity": [
       {
-        "id": "history-uuid",
-        "memory_id": "memory-uuid",
+        "ts": "2026-03-05T12:00:00.000Z",
         "event": "ADD",
-        "old_memory": null,
-        "new_memory": "User prefers concise answers.",
-        "created_at": "2026-03-05T12:00:00.000Z"
+        "memoryId": "memory-uuid",
+        "userId": "user-123",
+        "runId": null,
+        "preview": "User prefers concise answers.",
+        "latencyMs": 1050,
+        "inferMode": true
       }
-    ]
+    ],
+    "searches": {
+      "total": 88,
+      "zeroResultRatePct": 3,
+      "graphHitRatePct": 41,
+      "avgResults": 4.2,
+      "avgTopScore": 0.871,
+      "avgLatencyMs": 95,
+      "byDay": [
+        { "date": "2026-03-01", "count": 12, "zeroResults": 1, "avgLatencyMs": 88 }
+      ]
+    },
+    "graph": {
+      "enabled": true,
+      "totalWrites": 130,
+      "totalRelations": 312,
+      "totalEntities": 198,
+      "avgWriteLatencyMs": 780
+    }
   },
   "meta": { "version": "v2", "days": 30 }
 }
 ```
 
-Data source: `MEM0_HISTORY_DB_PATH` (default `/tmp/history.db`) — mem0's persistent SQLite history.
+**Field notes:**
+- `summary.totalCalls` — distinct `memory.add()` calls (rows with `call_id`; pre-migration rows not counted).
+- `summary.noneRatePct` — % of write *calls* (not rows) where mem0 decided nothing was worth storing. High values (>20%) suggest the extraction prompt needs tuning.
+- `searches.zeroResultRatePct` — % of searches returning 0 vector results. Spikes indicate embedding drift or an empty collection.
+- `searches.graphHitRatePct` — % of searches that returned graph relations. Only meaningful when `graph.enabled = true`.
+- `graph` — always present; `totalRelations/totalEntities/totalWrites` are 0 when graph is disabled.
 
 Dashboard mapping:
-- `byDay` array → bar chart (group by event type, x-axis = date)
-- `summary.byEvent` → summary totals card
+- `byDay` → write event bar chart (ADD/UPDATE/DELETE/NONE stacked, x-axis = date)
+- `searches.byDay` → search volume + zero-result overlay chart
+- `summary.byEvent` → totals card
+- `summary.noneRatePct` → prompt quality indicator
+- `searches.zeroResultRatePct` → search health indicator
+- `graph.totalRelations` → graph size widget (show only when `graph.enabled`)
 - `recentActivity` → activity feed / audit log
 
 ## 2.9 Prompt Config
