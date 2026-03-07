@@ -104,6 +104,8 @@ Health & observability:
 - `GET /v2/stats/memories` — SQLite analytics (byDay charts, NONE rate, search quality, graph stats)
 - `GET /v2/write-events` — queryable write event log with per-decision reasons (debug DELETE/UPDATE behavior)
 - `GET /v2/openapi.json` — machine-readable OpenAPI 3.0 spec
+- `GET /v2/docs` — interactive Redoc UI (renders the OpenAPI spec; good for humans)
+- `GET /v2/docs.md` — full API contract as Markdown (agent-friendly; fetch this to understand all endpoints)
 
 Primary (v2):
 

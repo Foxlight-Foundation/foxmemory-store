@@ -2,6 +2,11 @@ import express from "express";
 import { z } from "zod";
 import { Memory } from "@foxlight-foundation/mem0ai/oss";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -1863,6 +1868,8 @@ const V2_OPENAPI_SPEC = {
     "/health": { get: { summary: "Service health (v2 envelope)", operationId: "v2Health", responses: { "200": { description: "Health data including graphEnabled, neo4jUrl, graphLlmModel diagnostics.", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { diagnostics: { $ref: "#/components/schemas/HealthDiagnostics" } } } } }] } } } } } } },
     "/stats": { get: { summary: "Runtime counters (v2 envelope)", operationId: "v2Stats", responses: { "200": { description: "Stats data" } } } },
     "/openapi.json": { get: { summary: "This spec", operationId: "v2OpenAPI", responses: { "200": { description: "OpenAPI 3.0 JSON" } } } },
+    "/docs": { get: { summary: "Interactive API docs (Redoc UI)", operationId: "v2GetDocs", responses: { "200": { description: "HTML page rendering the OpenAPI spec via Redoc" } } } },
+    "/docs.md": { get: { summary: "Full API contract (Markdown)", operationId: "v2GetDocsMd", description: "Serves docs/API_CONTRACT.md as text/markdown. Suitable for agent consumption.", responses: { "200": { description: "Markdown text of the full API contract" } } } },
     "/stats/memories": {
       get: {
         summary: "SQLite history DB analytics — byDay bar chart, summary totals, activity feed, search quality, graph stats",
@@ -2022,6 +2029,29 @@ const V2_OPENAPI_SPEC = {
 
 app.get("/v2/openapi.json", (_req, res) => {
   res.json(V2_OPENAPI_SPEC);
+});
+
+app.get("/v2/docs", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(`<!DOCTYPE html>
+<html>
+  <head>
+    <title>foxmemory-store API v2</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <redoc spec-url="/v2/openapi.json" expand-responses="200,201"></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc/bundles/redoc.standalone.js"></script>
+  </body>
+</html>`);
+});
+
+app.get("/v2/docs.md", (_req, res) => {
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.sendFile(join(__dirname, "../docs/API_CONTRACT.md"));
 });
 
 app.listen(PORT, () => {

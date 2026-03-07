@@ -28,16 +28,21 @@
 ### Model update
 - Default `MEM0_GRAPH_LLM_MODEL` changed from `gpt-4o-mini` → `gpt-4.1-mini` across all compose files and `.env.example`
 
+### API docs endpoints
+- New `GET /v2/docs` — Redoc HTML UI auto-rendered from `/v2/openapi.json`; zero npm deps, CDN-loaded
+- New `GET /v2/docs.md` — serves `docs/API_CONTRACT.md` as `text/markdown`; agents can fetch this URL instead of reading the file directly
+
 ### OpenAPI spec
 - `POST /v2/memories` response now fully documented (mode, attempts, infer, result, decisions, relations, added_entities)
 - `HealthDiagnostics` schema extended with `neo4jConnected`, `neo4jNodeCount`, `neo4jRelationCount`, `neo4jError`
 - New schemas: `MemoryDecision`, `MemoryDecisions`, `WriteEventRow`
-- Added `/write-events`, `/graph/relations`, `/config/graph-prompt` paths
+- Added `/write-events`, `/graph/relations`, `/config/graph-prompt`, `/docs`, `/docs.md` paths
 
 ### Docs
+- `AGENTS.md` — added API reference links (`/v2/openapi.json`, `/v2/docs`, `/v2/docs.md`) so agents know to fetch the live contract
 - `ARCHITECTURE.md` — full rewrite: component table, v2 write/search flow diagrams, LLM call budget, analytics DB schema, updated gotchas, decision observability design notes
-- `README.md` — updated "What it does", full endpoint list, graph/analytics env vars, new graph tuning env vars
-- `API_CONTRACT.md` — section 2.9 (write-events debugger), 2.10 (prompt config), 2.11 (graph relations), 2.12 (openapi); write response updated with `decisions`; deployment notes include graph tuning env vars
+- `README.md` — updated "What it does", full endpoint list, graph/analytics env vars, new graph tuning env vars, docs endpoints
+- `API_CONTRACT.md` — section 2.9 (write-events debugger), 2.10 (prompt config), 2.11 (graph relations), 2.12 (openapi+docs endpoints); write response updated with `decisions`; deployment notes include graph tuning env vars
 
 ---
 

@@ -26,6 +26,9 @@ All tool-specific instruction files (Claude/Codex/Copilot/Cursor) are thin point
 - Scope: memory write/search and persistence APIs.
 - Do **not** add embedding inference logic here.
 - Keep backend adapters replaceable.
+- **API reference (machine-readable):** `GET /v2/openapi.json` — OpenAPI 3.0 spec.
+- **API reference (human/agent):** `GET /v2/docs` (Redoc UI) · `GET /v2/docs.md` (full Markdown contract, good for agent fetch).
+- Prefer fetching `/v2/docs.md` over reading `docs/API_CONTRACT.md` directly when working from a running instance.
 
 ### foxmemory-deploy
 - Scope: reproducible deployment topology and runbooks.

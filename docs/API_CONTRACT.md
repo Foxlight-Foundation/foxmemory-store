@@ -567,7 +567,7 @@ Success:
 
 ---
 
-## 2.12 OpenAPI Spec
+## 2.12 API Docs & Spec
 
 ### `GET /v2/openapi.json`
 
@@ -576,6 +576,20 @@ Returns the machine-readable OpenAPI 3.0.3 spec for all `/v2` endpoints. No auth
 ```json
 { "openapi": "3.0.3", "info": { "title": "foxmemory-store v2", ... }, "paths": { ... } }
 ```
+
+### `GET /v2/docs`
+
+Interactive Redoc UI. Renders the OpenAPI spec in a navigable HTML page. No auth required. Loads Redoc from CDN — requires internet access.
+
+### `GET /v2/docs.md`
+
+Serves this file (`docs/API_CONTRACT.md`) as `text/markdown`. Suitable for agent fetch — no parsing overhead, full exhaustive contract. No auth required.
+
+```
+Content-Type: text/markdown; charset=utf-8
+```
+
+> Agents building against this API should `GET /v2/docs.md` to understand all endpoints, request/response shapes, and deployment conventions.
 
 ---
 
