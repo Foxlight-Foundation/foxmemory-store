@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   packages: read
+  id-token: write  # required for Sigstore OIDC provenance signing
 
 jobs:
   build-and-push:
@@ -53,6 +54,8 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
           secrets: |
             npm_token=${{ secrets.NPM_TOKEN }}
           tags: |
