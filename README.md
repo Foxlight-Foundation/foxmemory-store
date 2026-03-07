@@ -14,6 +14,7 @@ Most AI apps are stateless by default. This service adds long-term memory so you
 - Supports semantic search over prior memories
 - Optional **graph memory** (Neo4j) — automatically extracts entities and relations on every write; surfaces them on search
 - Full **analytics DB** (SQLite) — persists write/search/graph event history across restarts; powers the `/v2/stats/memories` dashboard endpoint
+- **Decision observability** — every write response includes the LLM's reasoning (`decisions.actions[].reason`), extracted facts, and candidate memories; stored to SQLite; queryable via `GET /v2/write-events`
 - Runtime-configurable LLM prompts (Call 1, 2, and graph extraction) — persisted and survives restarts
 - Provides read, update, delete, and batch-delete endpoints
 - Uses Mem0 OSS under the hood (`@foxlight-foundation/mem0ai` fork)
@@ -82,6 +83,10 @@ Leave unset to disable. When set, enables entity/relation extraction on every wr
 - `NEO4J_USERNAME` — default `neo4j`
 - `NEO4J_PASSWORD`
 - `MEM0_GRAPH_LLM_MODEL` — default `gpt-4.1-mini`. Separate model for entity extraction; keeps main model fast.
+- `MEM0_GRAPH_CUSTOM_PROMPT` — initial graph entity extraction prompt (also settable at runtime via `PUT /v2/config/graph-prompt`)
+- `MEM0_GRAPH_SEARCH_THRESHOLD` — cosine similarity for candidate retrieval (default `0.7`)
+- `MEM0_GRAPH_NODE_DEDUP_THRESHOLD` — cosine similarity for node deduplication (default `0.9`)
+- `MEM0_GRAPH_BM25_TOPK` — BM25 reranking top-K in graph search (default `5`)
 
 ### Local history DB (ephemeral)
 
@@ -97,11 +102,12 @@ Health & observability:
 - `GET /v2/health` — same but normalized envelope + **live Neo4j connectivity check**
 - `GET /v2/stats` — runtime counters
 - `GET /v2/stats/memories` — SQLite analytics (byDay charts, NONE rate, search quality, graph stats)
+- `GET /v2/write-events` — queryable write event log with per-decision reasons (debug DELETE/UPDATE behavior)
 - `GET /v2/openapi.json` — machine-readable OpenAPI 3.0 spec
 
 Primary (v2):
 
-- `POST /v2/memories` — write (infer-first with deterministic fallback; returns `relations[]` when graph enabled)
+- `POST /v2/memories` — write (infer-first with deterministic fallback; returns `decisions`, `relations[]`, `added_entities[]` when graph enabled)
 - `POST /v2/memories/search` — semantic search (returns `relations[]` when graph enabled)
 - `POST /v2/memories/forget` — batch delete up to 1000 memories by ID
 - `GET /v2/memories` — list

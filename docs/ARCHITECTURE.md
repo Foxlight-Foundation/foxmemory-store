@@ -30,12 +30,17 @@ Client  →  POST /v2/memories
            │    ├─ LLM Call 3  (gpt-4.1-mini) — graph entity extraction
            │    ├─ LLM Call 4  (gpt-4.1-mini) — graph delete decision
            │    └─ Neo4j write — upsert nodes + relations
-           ├─ analyticsDb.recordWriteResults()  → write_events table
+           ├─ analyticsDb.recordWriteResults()  → write_events table (with reason, extracted_facts, candidates)
            ├─ analyticsDb.recordGraphWrite()    → graph_events table (when graph enabled)
-           └─ Response: { ok, data: { mode, result, relations[] } }
+           └─ Response: { ok, data: { mode, result, decisions, relations[], added_entities[] } }
 ```
 
-When graph is disabled: LLM Calls 3+4 and Neo4j write are skipped. `relations` is omitted from the response.
+When graph is disabled: LLM Calls 3+4 and Neo4j write are skipped. `relations` and `added_entities` are omitted from the response.
+
+`decisions` is always present and contains the full observability trace:
+- `extractedFacts` — Call 1 output (facts worth remembering)
+- `candidates` — existing memories retrieved from Qdrant for Call 2 comparison
+- `actions` — per-decision list with `event`, affected memory UUID, and `reason`
 
 ## Request flow — search (v2, graph enabled)
 
@@ -69,7 +74,7 @@ Client  →  POST /v2/memories/search
 
 Tables in `FOXMEMORY_ANALYTICS_DB_PATH`:
 
-- `write_events` — one row per mem0 result event (ADD/UPDATE/DELETE/NONE), plus `call_id` to group events from one `memory.add()` call.
+- `write_events` — one row per mem0 result event (ADD/UPDATE/DELETE/NONE). Key columns: `call_id` (groups events from one `memory.add()` call), `reason` (LLM explanation for the decision), `extracted_facts_json` (Call 1 output), `candidates_json` (existing memories considered by Call 2).
 - `search_events` — one row per search, includes `result_count`, `top_score`, `graph_hit`.
 - `graph_events` — one row per graph write, includes `entities_added`, `relations_added`.
 - `config` — key/value store for persisted runtime config (custom prompts).
@@ -81,6 +86,8 @@ Tables in `FOXMEMORY_ANALYTICS_DB_PATH`:
 - **v1 frozen** — plugin consumers depend on v1 shape; changes go to v2 only.
 - **OpenAI-compatible abstraction** — swap local inference (`foxmemory-infer`) for hosted OpenAI without code changes.
 - **Separate graph LLM** — `MEM0_GRAPH_LLM_MODEL` lets you use a more capable model (e.g. `gpt-4.1-mini`) for entity extraction without changing the main LLM used for fact extraction.
+- **Graph tuning env vars** — `MEM0_GRAPH_SEARCH_THRESHOLD` (0.7), `MEM0_GRAPH_NODE_DEDUP_THRESHOLD` (0.9), `MEM0_GRAPH_BM25_TOPK` (5) allow adjusting graph search precision and entity deduplication sensitivity without code changes.
+- **Decision observability** — every write response includes `decisions` (extractedFacts, candidates, actions with reasons). Write events are persisted to SQLite with per-row `reason`, queryable via `GET /v2/write-events`. Primary debugging tool for unexpected DELETE/UPDATE behavior.
 - **Analytics are self-contained** — no external analytics service; SQLite is enough for a homelab. The DB path should be on a persistent volume.
 - **Graph is optional** — leave `NEO4J_URL` unset to disable. Zero overhead when disabled.
 

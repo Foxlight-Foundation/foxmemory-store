@@ -129,13 +129,39 @@ Success response:
     "infer": { "resultCount": 1 },
     "fallback": { "resultCount": 0 },
     "result": { "results": [] },
-    "relations": [{ "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }]
+    "decisions": {
+      "extractedFacts": ["User prefers concise answers"],
+      "candidates": [
+        { "id": "uuid-of-existing-memory", "text": "User likes detailed explanations" }
+      ],
+      "actions": [
+        {
+          "event": "DELETE",
+          "id": "uuid-of-existing-memory",
+          "text": "User likes detailed explanations",
+          "reason": "Contradicted by new fact: user prefers concise answers"
+        },
+        {
+          "event": "ADD",
+          "id": "uuid-of-new-memory",
+          "text": "User prefers concise answers",
+          "reason": "New fact not previously stored"
+        }
+      ]
+    },
+    "relations": [{ "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }],
+    "added_entities": []
   }
 }
 ```
 
+- `decisions` — always present. Shows the full reasoning trace for this write call:
+  - `extractedFacts` — output of Call 1 (what the LLM thought was worth remembering from the input)
+  - `candidates` — existing memories retrieved from Qdrant for comparison
+  - `actions` — Call 2 decision list with `reason` per entry (explains why each memory was ADD/UPDATE/DELETE/NONE)
 - `relations` is only present when graph memory is enabled. Contains graph triples added/identified by this write call.
-- When graph is disabled, `relations` is omitted entirely (not `null` or `[]`).
+- `added_entities` — graph entities upserted (only when graph enabled).
+- When graph is disabled, `relations` and `added_entities` are omitted entirely.
 
 Idempotency:
 - Key sources:
@@ -375,7 +401,66 @@ Dashboard mapping:
 - `graph.totalRelations` → graph size widget (show only when `graph.enabled`)
 - `recentActivity` → activity feed / audit log
 
-## 2.9 Prompt Config
+## 2.9 Write Events Log (Decision Debugger)
+
+### `GET /v2/write-events`
+
+Queryable log of all write events stored in the analytics DB. Primary tool for understanding why a specific ADD/UPDATE/DELETE/NONE decision was made.
+
+Query params (all optional):
+- `user_id`, `run_id` — filter by scope
+- `memory_id` — filter to events touching a specific memory UUID
+- `event_type` — one of `ADD`, `UPDATE`, `DELETE`, `NONE`
+- `limit` — default 50, max 500
+- `before` — ISO timestamp; return events before this time
+
+Success:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "events": [
+      {
+        "id": "row-uuid",
+        "ts": "2026-03-07T10:00:00.000Z",
+        "event_type": "DELETE",
+        "memory_id": "uuid-of-deleted-memory",
+        "user_id": "user-123",
+        "run_id": null,
+        "memory_text": "User likes detailed explanations",
+        "reason": "Contradicted by new fact: user prefers concise answers",
+        "extracted_facts": ["User prefers concise answers"],
+        "candidates": [
+          { "id": "uuid-of-deleted-memory", "text": "User likes detailed explanations" }
+        ],
+        "call_id": "call-group-uuid",
+        "latency_ms": 1840,
+        "infer_mode": true
+      }
+    ],
+    "count": 1
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+**Field notes:**
+- `reason` — the LLM's one-line explanation for why it chose this event. `null` for rows written before this feature was deployed.
+- `extracted_facts` — what Call 1 extracted from the triggering input. `null` for pre-feature rows.
+- `candidates` — existing memories that were in context for Call 2. `null` for pre-feature rows.
+- `call_id` — groups all events from one `memory.add()` call. Use this to see every decision made in a single write.
+- Returns 503 when the analytics DB is unavailable.
+
+**Typical debugging workflow:**
+1. See an unexpected DELETE in `recentActivity` from `GET /v2/stats/memories`.
+2. Note the `memoryId`.
+3. `GET /v2/write-events?memory_id=<id>&event_type=DELETE` — see the `reason` and `extracted_facts` that caused it.
+4. Use `call_id` to fetch all events from that write: `GET /v2/write-events?call_id=<call_id>` (if added to query params).
+
+---
+
+## 2.10 Prompt Config
 
 Runtime-editable LLM prompts for memory inference. Changes take effect immediately on the next `memory.add()` call. Persisted to SQLite — survives restarts.
 
@@ -450,7 +535,7 @@ Request body:
 
 ---
 
-## 2.10 Graph Relations Browse _(graph-enabled only)_
+## 2.11 Graph Relations Browse _(graph-enabled only)_
 
 ### `GET /v2/graph/relations?user_id=&run_id=&limit=`
 
@@ -482,7 +567,7 @@ Success:
 
 ---
 
-## 2.11 OpenAPI Spec
+## 2.12 OpenAPI Spec
 
 ### `GET /v2/openapi.json`
 
@@ -601,6 +686,9 @@ Common v2 titles:
   - `NEO4J_USERNAME` — default: `neo4j`
   - `NEO4J_PASSWORD` — required when `NEO4J_URL` is set
   - `MEM0_GRAPH_LLM_MODEL` — optional separate model for entity/relation extraction. Defaults to `MEM0_LLM_MODEL`. Recommended: `gpt-4.1-mini` (hosted) or `Qwen2.5-14B-Instruct` / `Mistral-Small-3.1` (local).
+  - `MEM0_GRAPH_SEARCH_THRESHOLD` — cosine similarity threshold for graph candidate retrieval (default: `0.7`).
+  - `MEM0_GRAPH_NODE_DEDUP_THRESHOLD` — cosine similarity threshold for node deduplication during entity upsert (default: `0.9`).
+  - `MEM0_GRAPH_BM25_TOPK` — max results returned after BM25 reranking in graph search (default: `5`).
 
 When graph memory is enabled:
 - Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment). Write responses include a top-level `relations` array (graph triples added by this call).
