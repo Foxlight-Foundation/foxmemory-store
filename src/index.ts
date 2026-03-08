@@ -200,20 +200,17 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
             ...(GRAPH_SEARCH_THRESHOLD !== undefined ? { searchThreshold: GRAPH_SEARCH_THRESHOLD } : {}),
             ...(GRAPH_NODE_DEDUP_THRESHOLD !== undefined ? { nodeDeduplicationThreshold: GRAPH_NODE_DEDUP_THRESHOLD } : {}),
             ...(GRAPH_BM25_TOPK !== undefined ? { bm25TopK: GRAPH_BM25_TOPK } : {}),
-            // Optional separate LLM for graph entity/relation extraction.
-            // Defaults to the main LLM_MODEL if MEM0_GRAPH_LLM_MODEL is not set.
-            ...(GRAPH_LLM_MODEL !== LLM_MODEL
-              ? {
-                  llm: {
-                    provider: "openai",
-                    config: {
-                      apiKey: OPENAI_API_KEY,
-                      model: GRAPH_LLM_MODEL,
-                      ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {}),
-                    },
-                  },
-                }
-              : {}),
+            // Always inject graphStore.llm so the shallow merge in ConfigManager
+            // doesn't let DEFAULT_MEMORY_CONFIG.graphStore.llm (gpt-4-turbo-preview)
+            // win over the main LLM config when GRAPH_LLM_MODEL === LLM_MODEL.
+            llm: {
+              provider: "openai",
+              config: {
+                apiKey: OPENAI_API_KEY,
+                model: GRAPH_LLM_MODEL,
+                ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {}),
+              },
+            },
           },
         }
       : {}),
