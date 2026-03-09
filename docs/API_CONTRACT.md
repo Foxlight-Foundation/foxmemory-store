@@ -460,7 +460,96 @@ Success:
 
 ---
 
-## 2.10 Prompt Config
+## 2.10 Model Config
+
+Runtime-editable LLM model selection. Changes take effect immediately (hot-reload — no restart needed). Persisted to SQLite and survive restarts. The effective model always starts from the env var; DB overrides take precedence.
+
+### `GET /v2/config/models`
+
+Returns the effective model for each role, the source of that value, and the full catalog entry (name, description, pricing).
+
+```json
+{
+  "ok": true,
+  "data": {
+    "llmModel":      { "value": "gpt-4.1-nano", "source": "env",       "model": { "id": "gpt-4.1-nano", "name": "GPT-4.1 Nano", "input_mtok": 0.10, "cached_mtok": 0.025, "output_mtok": 0.40, ... } },
+    "graphLlmModel": { "value": "gpt-4.1-mini", "source": "persisted", "model": { "id": "gpt-4.1-mini", "name": "GPT-4.1 Mini", ... } }
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+`source`:
+- `"env"` — value comes from the env var (`MEM0_LLM_MODEL` / `MEM0_GRAPH_LLM_MODEL`)
+- `"persisted"` — value overridden via `PUT /v2/config/model` and stored in SQLite
+
+### `PUT /v2/config/model`
+
+Set a model override. The value must exist in the catalog **and** have the correct role. Hot-reloads the mem0 Memory instance immediately.
+
+```json
+{ "key": "llm_model", "value": "gpt-4.1-mini" }
+```
+
+Valid keys: `llm_model`, `graph_llm_model`
+
+Response: `{ "ok": true, "data": { "key": "llm_model", "value": "gpt-4.1-mini", "reloaded": true } }`
+
+Errors:
+- `400` — model not in catalog, or model not valid for that role
+
+### `DELETE /v2/config/model/:key`
+
+Clear a persisted override — reverts to the env var default and hot-reloads.
+
+```
+DELETE /v2/config/model/graph_llm_model
+→ { "ok": true, "data": { "key": "graph_llm_model", "reverted_to": "gpt-4.1-nano", "reloaded": true } }
+```
+
+---
+
+## 2.10a Model Catalog
+
+A curated list of models per role. Pre-seeded on startup with known OpenAI models (INSERT OR IGNORE — user edits are preserved). Used to validate model selection and power UI dropdowns with cost/description data.
+
+**ModelCatalogEntry shape:**
+```json
+{
+  "id":          "gpt-4.1-mini",
+  "name":        "GPT-4.1 Mini",
+  "description": "Balanced cost/quality. Recommended for graph extraction.",
+  "roles":       ["llm", "graph_llm"],
+  "input_mtok":  0.40,
+  "cached_mtok": 0.10,
+  "output_mtok": 1.60,
+  "created_at":  1741234567
+}
+```
+
+### `GET /v2/config/models/catalog`
+
+List all catalog entries. Optional `?role=llm` or `?role=graph_llm` to filter.
+
+Response: `{ "ok": true, "data": { "models": [...], "count": 5 } }`
+
+### `POST /v2/config/models/catalog`
+
+Add a new model (or replace an existing one). All fields from `ModelCatalogEntry` except `created_at`.
+
+### `PUT /v2/config/models/catalog/:id`
+
+Partial update of an existing catalog entry. Unknown fields in the body are ignored; missing fields retain their current values.
+
+Returns `404` if `id` not found.
+
+### `DELETE /v2/config/models/catalog/:id`
+
+Remove a model from the catalog. Returns `404` if not found.
+
+---
+
+## 2.11 Prompt Config
 
 Runtime-editable LLM prompts for memory inference. Changes take effect immediately on the next `memory.add()` call. Persisted to SQLite — survives restarts.
 

@@ -35,6 +35,11 @@ const NEO4J_URL = process.env.NEO4J_URL || null;
 const NEO4J_USERNAME = process.env.NEO4J_USERNAME || "neo4j";
 const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || null;
 const GRAPH_LLM_MODEL = process.env.MEM0_GRAPH_LLM_MODEL || LLM_MODEL;
+
+// Mutable effective models — start from env vars, overridden by DB on startup.
+// Use these everywhere instead of the const env vars so hot-reload works.
+let effectiveLlmModel = LLM_MODEL;
+let effectiveGraphLlmModel = GRAPH_LLM_MODEL;
 const GRAPH_ENABLED = Boolean(NEO4J_URL && NEO4J_PASSWORD);
 // Graph similarity/reranking tuning (all optional — defaults match fork hardcodes)
 const GRAPH_SEARCH_THRESHOLD = process.env.MEM0_GRAPH_SEARCH_THRESHOLD
@@ -193,7 +198,7 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
       provider: "openai",
       config: {
         apiKey: OPENAI_API_KEY,
-        model: LLM_MODEL,
+        model: effectiveLlmModel,
         ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
       }
     },
@@ -241,7 +246,7 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
               provider: "openai",
               config: {
                 apiKey: OPENAI_API_KEY,
-                model: GRAPH_LLM_MODEL,
+                model: effectiveGraphLlmModel,
                 ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {}),
               },
             },
@@ -1304,6 +1309,17 @@ class FoxAnalyticsDB {
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS model_catalog (
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        description  TEXT,
+        roles        TEXT NOT NULL DEFAULT '[]',
+        input_mtok   REAL,
+        cached_mtok  REAL,
+        output_mtok  REAL,
+        created_at   INTEGER DEFAULT (unixepoch())
+      );
     `);
     // Additive migrations for existing DBs (SQLite ALTER TABLE has no IF NOT EXISTS)
     for (const sql of [
@@ -1555,6 +1571,52 @@ class FoxAnalyticsDB {
       return null;
     }
   }
+
+  // ── Model catalog ──────────────────────────────────────────────────────────
+
+  seedCatalog(entries: Array<{ id: string; name: string; description: string; roles: string[]; input_mtok: number | null; cached_mtok: number | null; output_mtok: number | null }>) {
+    const stmt = this.db.prepare(
+      "INSERT OR IGNORE INTO model_catalog (id, name, description, roles, input_mtok, cached_mtok, output_mtok) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    );
+    for (const e of entries) {
+      stmt.run(e.id, e.name, e.description, JSON.stringify(e.roles), e.input_mtok, e.cached_mtok, e.output_mtok);
+    }
+  }
+
+  getCatalogModels(role?: string): any[] {
+    const rows: any[] = this.db.prepare("SELECT * FROM model_catalog ORDER BY id").all() as any[];
+    const out = rows.map((r: any) => ({ ...r, roles: JSON.parse(r.roles ?? "[]") }));
+    if (role) return out.filter((r: any) => r.roles.includes(role));
+    return out;
+  }
+
+  getCatalogModel(id: string): any | null {
+    const row: any = this.db.prepare("SELECT * FROM model_catalog WHERE id = ?").get(id) as any;
+    if (!row) return null;
+    return { ...row, roles: JSON.parse(row.roles ?? "[]") };
+  }
+
+  upsertCatalogModel(entry: { id: string; name: string; description?: string | null; roles: string[]; input_mtok?: number | null; cached_mtok?: number | null; output_mtok?: number | null }) {
+    this.db.prepare(
+      `INSERT INTO model_catalog (id, name, description, roles, input_mtok, cached_mtok, output_mtok)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name        = excluded.name,
+         description = excluded.description,
+         roles       = excluded.roles,
+         input_mtok  = excluded.input_mtok,
+         cached_mtok = excluded.cached_mtok,
+         output_mtok = excluded.output_mtok`
+    ).run(
+      entry.id, entry.name, entry.description ?? null, JSON.stringify(entry.roles),
+      entry.input_mtok ?? null, entry.cached_mtok ?? null, entry.output_mtok ?? null
+    );
+  }
+
+  deleteCatalogModel(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM model_catalog WHERE id = ?").run(id);
+    return (result.changes as number) > 0;
+  }
 }
 
 let analyticsDb: FoxAnalyticsDB | null = null;
@@ -1576,9 +1638,27 @@ try {
     currentCustomGraphPrompt = persistedGraph;
     console.log("[config] restored custom graph prompt from DB");
   }
-  if (persisted !== null || persistedUpdate !== null || persistedGraph !== null) {
-    memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  // Seed model catalog (INSERT OR IGNORE — never overwrites user edits)
+  analyticsDb.seedCatalog([
+    { id: "gpt-4.1-nano",  name: "GPT-4.1 Nano",  roles: ["llm", "graph_llm"], description: "Fastest and cheapest. Good for simple fact extraction; poor graph quality.",         input_mtok: 0.10,  cached_mtok: 0.025, output_mtok: 0.40  },
+    { id: "gpt-4.1-mini",  name: "GPT-4.1 Mini",  roles: ["llm", "graph_llm"], description: "Balanced cost/quality. Recommended for graph extraction.",                           input_mtok: 0.40,  cached_mtok: 0.10,  output_mtok: 1.60  },
+    { id: "gpt-4.1",       name: "GPT-4.1",        roles: ["llm", "graph_llm"], description: "Highest quality in the 4.1 family. Use when accuracy matters most.",                 input_mtok: 2.00,  cached_mtok: 0.50,  output_mtok: 8.00  },
+    { id: "gpt-4o-mini",   name: "GPT-4o Mini",    roles: ["llm", "graph_llm"], description: "Strong cost/quality ratio. Good alternative to gpt-4.1-mini for graph ops.",        input_mtok: 0.15,  cached_mtok: 0.075, output_mtok: 0.60  },
+    { id: "gpt-4o",        name: "GPT-4o",          roles: ["llm", "graph_llm"], description: "High capability. Use for complex memory or graph tasks where quality is critical.", input_mtok: 2.50,  cached_mtok: 1.25,  output_mtok: 10.00 },
+  ]);
+
+  // Restore persisted model overrides (DB wins over env)
+  const persistedLlmModel = analyticsDb.getConfig("model_llm");
+  if (persistedLlmModel !== null) {
+    effectiveLlmModel = persistedLlmModel;
+    console.log(`[config] restored llm model from DB: ${effectiveLlmModel}`);
   }
+  const persistedGraphLlmModel = analyticsDb.getConfig("model_graph_llm");
+  if (persistedGraphLlmModel !== null) {
+    effectiveGraphLlmModel = persistedGraphLlmModel;
+    console.log(`[config] restored graph llm model from DB: ${effectiveGraphLlmModel}`);
+  }
+
 } catch (e) {
   console.warn("[analytics] DB unavailable (set FOXMEMORY_ANALYTICS_DB_PATH to a writable path):", String(e));
 }
@@ -2003,6 +2083,141 @@ app.get("/v2/graph/stats", async (req, res) => {
   }
 });
 
+// ── model config + catalog ────────────────────────────────────────────────
+
+const MODEL_ROLES = ["llm", "graph_llm"] as const;
+type ModelRole = typeof MODEL_ROLES[number];
+
+const MODEL_KEY_TO_ROLE: Record<string, ModelRole> = {
+  llm_model:       "llm",
+  graph_llm_model: "graph_llm",
+};
+
+const v2SetModelSchema = z.object({
+  key:   z.enum(["llm_model", "graph_llm_model"]),
+  value: z.string().min(1),
+});
+
+const v2CatalogUpsertSchema = z.object({
+  id:          z.string().min(1),
+  name:        z.string().min(1),
+  description: z.string().nullable().optional(),
+  roles:       z.array(z.enum(MODEL_ROLES)).min(1),
+  input_mtok:  z.number().nonnegative().nullable().optional(),
+  cached_mtok: z.number().nonnegative().nullable().optional(),
+  output_mtok: z.number().nonnegative().nullable().optional(),
+});
+
+const getModelSource = (effective: string, envDefault: string, dbKey: string) => {
+  const dbVal = analyticsDb?.getConfig(dbKey) ?? null;
+  if (dbVal !== null) return "persisted";
+  if (effective === envDefault) return "env";
+  return "env";
+};
+
+app.get("/v2/config/models", (_req, res) => {
+  const catalog = analyticsDb?.getCatalogModels() ?? [];
+  const findModel = (id: string) => catalog.find((m: any) => m.id === id) ?? null;
+
+  return v2Ok(res, {
+    llmModel: {
+      value:  effectiveLlmModel,
+      source: getModelSource(effectiveLlmModel, LLM_MODEL, "model_llm"),
+      model:  findModel(effectiveLlmModel),
+    },
+    graphLlmModel: {
+      value:  effectiveGraphLlmModel,
+      source: getModelSource(effectiveGraphLlmModel, GRAPH_LLM_MODEL, "model_graph_llm"),
+      model:  findModel(effectiveGraphLlmModel),
+    },
+  });
+});
+
+app.put("/v2/config/model", (req, res) => {
+  const parsed = v2SetModelSchema.safeParse(req.body);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+
+  const { key, value } = parsed.data;
+  const role = MODEL_KEY_TO_ROLE[key];
+
+  // Validate value exists in catalog for this role
+  const catalogEntry = analyticsDb?.getCatalogModel(value) ?? null;
+  if (!catalogEntry) {
+    return v2Err(res, 400, "VALIDATION_ERROR", `Model '${value}' not found in catalog. Add it via POST /v2/config/models/catalog first.`);
+  }
+  if (!catalogEntry.roles.includes(role)) {
+    return v2Err(res, 400, "VALIDATION_ERROR", `Model '${value}' is not valid for role '${role}'. Its roles are: ${catalogEntry.roles.join(", ")}`);
+  }
+
+  // Apply and persist
+  if (key === "llm_model") effectiveLlmModel = value;
+  else effectiveGraphLlmModel = value;
+
+  analyticsDb?.setConfig(key === "llm_model" ? "model_llm" : "model_graph_llm", value);
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  console.log(`[config] ${key} set to ${value} (hot-reloaded)`);
+
+  return v2Ok(res, { key, value, reloaded: true });
+});
+
+app.delete("/v2/config/model/:key", (req, res) => {
+  const key = req.params.key;
+  if (!["llm_model", "graph_llm_model"].includes(key)) {
+    return v2Err(res, 400, "VALIDATION_ERROR", "key must be llm_model or graph_llm_model");
+  }
+
+  if (key === "llm_model") {
+    effectiveLlmModel = LLM_MODEL;
+    analyticsDb?.setConfig("model_llm", null);
+  } else {
+    effectiveGraphLlmModel = GRAPH_LLM_MODEL;
+    analyticsDb?.setConfig("model_graph_llm", null);
+  }
+
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  console.log(`[config] ${key} cleared, reverted to env default (hot-reloaded)`);
+
+  return v2Ok(res, { key, reverted_to: key === "llm_model" ? LLM_MODEL : GRAPH_LLM_MODEL, reloaded: true });
+});
+
+// ── model catalog CRUD ────────────────────────────────────────────────────
+
+app.get("/v2/config/models/catalog", (req, res) => {
+  const role = req.query.role as string | undefined;
+  if (role && !MODEL_ROLES.includes(role as ModelRole)) {
+    return v2Err(res, 400, "VALIDATION_ERROR", `role must be one of: ${MODEL_ROLES.join(", ")}`);
+  }
+  const models = analyticsDb?.getCatalogModels(role) ?? [];
+  return v2Ok(res, { models, count: models.length });
+});
+
+app.post("/v2/config/models/catalog", (req, res) => {
+  if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
+  const parsed = v2CatalogUpsertSchema.safeParse(req.body);
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  analyticsDb.upsertCatalogModel(parsed.data);
+  const model = analyticsDb.getCatalogModel(parsed.data.id);
+  return v2Ok(res, { model });
+});
+
+app.put("/v2/config/models/catalog/:id", (req, res) => {
+  if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
+  const existing = analyticsDb.getCatalogModel(req.params.id);
+  if (!existing) return v2Err(res, 404, "NOT_FOUND", `Model '${req.params.id}' not found in catalog`);
+  const parsed = v2CatalogUpsertSchema.safeParse({ ...existing, ...req.body, id: req.params.id });
+  if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  analyticsDb.upsertCatalogModel(parsed.data);
+  const model = analyticsDb.getCatalogModel(req.params.id);
+  return v2Ok(res, { model });
+});
+
+app.delete("/v2/config/models/catalog/:id", (req, res) => {
+  if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
+  const deleted = analyticsDb.deleteCatalogModel(req.params.id);
+  if (!deleted) return v2Err(res, 404, "NOT_FOUND", `Model '${req.params.id}' not found in catalog`);
+  return v2Ok(res, { deleted: req.params.id });
+});
+
 // ── graph-prompt config ────────────────────────────────────────────────────
 
 app.get("/v2/config/graph-prompt", (_req, res) => {
@@ -2109,6 +2324,20 @@ const V2_OPENAPI_SPEC = {
           source: { type: "string" },
           relationship: { type: "string" },
           destination: { type: "string" },
+        },
+      },
+      ModelCatalogEntry: {
+        type: "object",
+        required: ["id", "name", "roles"],
+        properties: {
+          id:          { type: "string", description: "Model ID as used in API calls (e.g. 'gpt-4.1-mini')" },
+          name:        { type: "string", description: "Human-readable display name" },
+          description: { type: "string", nullable: true, description: "What this model is good/bad for" },
+          roles:       { type: "array", items: { type: "string", enum: ["llm", "graph_llm"] }, description: "Which roles this model is valid for" },
+          input_mtok:  { type: "number", nullable: true, description: "Cost per million input tokens (USD)" },
+          cached_mtok: { type: "number", nullable: true, description: "Cost per million cached input tokens (USD)" },
+          output_mtok: { type: "number", nullable: true, description: "Cost per million output tokens (USD)" },
+          created_at:  { type: "integer", description: "Unix timestamp of creation" },
         },
       },
       GraphNode: {
@@ -2317,6 +2546,61 @@ const V2_OPENAPI_SPEC = {
           idempotency_key: { type: "string" },
         } } } } },
         responses: { "200": { description: "{ deleted: uuid[], count: number }" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
+      },
+    },
+    "/config/models": {
+      get: {
+        summary: "Get effective model for each role, with source (env|persisted) and full catalog entry",
+        operationId: "v2GetModels",
+        responses: { "200": { description: "{ llmModel: ModelConfig, graphLlmModel: ModelConfig }" } },
+      },
+    },
+    "/config/model": {
+      put: {
+        summary: "Set model override for a role — persisted across restarts, hot-reloads immediately. Value must exist in catalog.",
+        operationId: "v2SetModel",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["key", "value"], properties: {
+          key: { type: "string", enum: ["llm_model", "graph_llm_model"] },
+          value: { type: "string", description: "Model ID from catalog" },
+        } } } } },
+        responses: { "200": { description: "{ key, value, reloaded: true }" }, "400": { description: "Validation error or model not in catalog for role" } },
+      },
+    },
+    "/config/model/{key}": {
+      delete: {
+        summary: "Clear model override — reverts to env var default and hot-reloads",
+        operationId: "v2DeleteModel",
+        parameters: [{ name: "key", in: "path", required: true, schema: { type: "string", enum: ["llm_model", "graph_llm_model"] } }],
+        responses: { "200": { description: "{ key, reverted_to, reloaded: true }" }, "400": { description: "Invalid key" } },
+      },
+    },
+    "/config/models/catalog": {
+      get: {
+        summary: "List model catalog entries, optionally filtered by role",
+        operationId: "v2GetCatalog",
+        parameters: [{ name: "role", in: "query", schema: { type: "string", enum: ["llm", "graph_llm"] } }],
+        responses: { "200": { description: "{ models: ModelCatalogEntry[], count: number }" } },
+      },
+      post: {
+        summary: "Add or replace a model catalog entry",
+        operationId: "v2CreateCatalogModel",
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/ModelCatalogEntry" } } } },
+        responses: { "200": { description: "{ model: ModelCatalogEntry }" }, "400": { description: "Validation error" } },
+      },
+    },
+    "/config/models/catalog/{id}": {
+      put: {
+        summary: "Update an existing model catalog entry (partial updates allowed)",
+        operationId: "v2UpdateCatalogModel",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/ModelCatalogEntry" } } } },
+        responses: { "200": { description: "{ model: ModelCatalogEntry }" }, "404": { description: "Not found" } },
+      },
+      delete: {
+        summary: "Remove a model from the catalog",
+        operationId: "v2DeleteCatalogModel",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ deleted: string }" }, "404": { description: "Not found" } },
       },
     },
     "/config/prompt": {
