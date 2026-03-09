@@ -624,7 +624,7 @@ Request body:
 
 ---
 
-## 2.11 Graph API _(graph-enabled only)_
+## 2.12 Graph API _(graph-enabled only)_
 
 All endpoints below return `400 BAD_REQUEST` when graph memory is not enabled (`NEO4J_URL` unset).
 
@@ -806,7 +806,7 @@ Success:
 
 ---
 
-## 2.12 API Docs & Spec
+## 2.13 API Docs & Spec
 
 ### `GET /v2/openapi.json`
 
