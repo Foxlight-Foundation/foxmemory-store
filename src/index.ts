@@ -352,6 +352,21 @@ function trackAddResult(mode: "infer" | "raw", result: any) {
   }
 }
 
+function captureGraphLinks(result: any, userId?: string) {
+  if (!analyticsDb?.ready || !GRAPH_ENABLED) return;
+  const nodeIds: string[] = result?.added_node_ids ?? [];
+  const edgeIds: string[] = result?.added_edge_ids ?? [];
+  if (!nodeIds.length && !edgeIds.length) return;
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  for (const r of rows) {
+    const ev = String(r?.metadata?.event || r?.event || "").toUpperCase();
+    if (ev === "ADD" || ev === "UPDATE") {
+      const memId = r?.id ?? r?.memory_id;
+      if (memId) analyticsDb.insertGraphLinks(memId, nodeIds, edgeIds, userId);
+    }
+  }
+}
+
 const ADD_RETRIES = Number(process.env.MEM0_ADD_RETRIES || 3);
 const ADD_RETRY_DELAY_MS = Number(process.env.MEM0_ADD_RETRY_DELAY_MS || 250);
 
@@ -446,6 +461,7 @@ app.post("/v1/memories", async (req, res) => {
     });
 
     trackAddResult("infer", result);
+    captureGraphLinks(result, body.user_id);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
@@ -757,6 +773,7 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
     });
     if (Array.isArray(inferResult?.results) && inferResult.results.length > 0) {
       trackAddResult("infer", inferResult);
+      captureGraphLinks(inferResult, userId);
       return {
         mode: "inferred",
         attempts: ADD_RETRIES,
@@ -796,6 +813,7 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
   } as any);
 
   trackAddResult("raw", rawResult);
+  captureGraphLinks(rawResult, userId);
   return {
     mode: "fallback_raw",
     attempts: inferPreferred ? ADD_RETRIES : 0,
@@ -1320,6 +1338,18 @@ class FoxAnalyticsDB {
         output_mtok  REAL,
         created_at   INTEGER DEFAULT (unixepoch())
       );
+
+      CREATE TABLE IF NOT EXISTS memory_graph_links (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        vector_memory_id TEXT NOT NULL,
+        graph_node_id    TEXT,
+        graph_edge_id    TEXT,
+        user_id          TEXT,
+        created_at       INTEGER DEFAULT (unixepoch())
+      );
+      CREATE INDEX IF NOT EXISTS idx_mgl_vector ON memory_graph_links(vector_memory_id);
+      CREATE INDEX IF NOT EXISTS idx_mgl_node   ON memory_graph_links(graph_node_id);
+      CREATE INDEX IF NOT EXISTS idx_mgl_edge   ON memory_graph_links(graph_edge_id);
     `);
     // Additive migrations for existing DBs (SQLite ALTER TABLE has no IF NOT EXISTS)
     for (const sql of [
@@ -1616,6 +1646,56 @@ class FoxAnalyticsDB {
   deleteCatalogModel(id: string): boolean {
     const result = this.db.prepare("DELETE FROM model_catalog WHERE id = ?").run(id);
     return (result.changes as number) > 0;
+  }
+
+  // ── memory_graph_links ────────────────────────────────────────────────────
+
+  insertGraphLinks(vectorMemoryId: string, nodeIds: string[], edgeIds: string[], userId?: string) {
+    const stmt = this.db.prepare(
+      "INSERT INTO memory_graph_links (vector_memory_id, graph_node_id, graph_edge_id, user_id) VALUES (?, ?, ?, ?)"
+    );
+    for (const nodeId of nodeIds) stmt.run(vectorMemoryId, nodeId, null, userId ?? null);
+    for (const edgeId of edgeIds) stmt.run(vectorMemoryId, null, edgeId, userId ?? null);
+  }
+
+  getLinkedNodeIds(vectorMemoryId: string): string[] {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT graph_node_id FROM memory_graph_links WHERE vector_memory_id = ? AND graph_node_id IS NOT NULL"
+    ).all(vectorMemoryId) as any[];
+    return rows.map((r: any) => r.graph_node_id);
+  }
+
+  getLinkedEdgeIds(vectorMemoryId: string): string[] {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT graph_edge_id FROM memory_graph_links WHERE vector_memory_id = ? AND graph_edge_id IS NOT NULL"
+    ).all(vectorMemoryId) as any[];
+    return rows.map((r: any) => r.graph_edge_id);
+  }
+
+  // How many OTHER vector memories also link to this node/edge?
+  otherMemoriesForNode(graphNodeId: string, excludeVectorMemoryId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(DISTINCT vector_memory_id) AS cnt FROM memory_graph_links WHERE graph_node_id = ? AND vector_memory_id != ?"
+    ).get(graphNodeId, excludeVectorMemoryId) as any;
+    return row?.cnt ?? 0;
+  }
+
+  otherMemoriesForEdge(graphEdgeId: string, excludeVectorMemoryId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(DISTINCT vector_memory_id) AS cnt FROM memory_graph_links WHERE graph_edge_id = ? AND vector_memory_id != ?"
+    ).get(graphEdgeId, excludeVectorMemoryId) as any;
+    return row?.cnt ?? 0;
+  }
+
+  deleteLinksForMemory(vectorMemoryId: string) {
+    this.db.prepare("DELETE FROM memory_graph_links WHERE vector_memory_id = ?").run(vectorMemoryId);
+  }
+
+  getLinkStats(): { linkedMemories: number; trackedNodes: number; trackedEdges: number } {
+    const mem = this.db.prepare("SELECT COUNT(DISTINCT vector_memory_id) AS cnt FROM memory_graph_links").get() as any;
+    const nodes = this.db.prepare("SELECT COUNT(DISTINCT graph_node_id) AS cnt FROM memory_graph_links WHERE graph_node_id IS NOT NULL").get() as any;
+    const edges = this.db.prepare("SELECT COUNT(DISTINCT graph_edge_id) AS cnt FROM memory_graph_links WHERE graph_edge_id IS NOT NULL").get() as any;
+    return { linkedMemories: mem?.cnt ?? 0, trackedNodes: nodes?.cnt ?? 0, trackedEdges: edges?.cnt ?? 0 };
   }
 }
 
