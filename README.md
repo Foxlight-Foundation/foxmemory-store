@@ -209,11 +209,24 @@ curl -s http://localhost:8082/v2/health | jq .diagnostics.neo4jConnected
 | `MEM0_GRAPH_NODE_DEDUP_THRESHOLD` | `0.9` | Cosine similarity threshold for node deduplication |
 | `MEM0_GRAPH_BM25_TOPK` | `5` | BM25 reranking top-K in graph search |
 
+### Write gate (pre-flight filter)
+
+Writes that fail the gate are returned immediately as `mode: "skipped"` — no LLM calls, no Qdrant writes, no graph ops.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEM0_MIN_INPUT_CHARS` | `20` | Skip writes whose total message content is below this character count |
+| `MEM0_SKIP_PATTERNS` | _(see below)_ | Comma-separated regex patterns (case-insensitive). Any write whose combined content matches is skipped. |
+
+Default skip patterns (always active): `HEARTBEAT_OK`, `HEARTBEAT`, bare `[[tag]]` messages, `PING`, `PONG`, `OK`.
+
+Custom patterns via `MEM0_SKIP_PATTERNS` are appended to the defaults, not replacing them.
+
 ### Retry / misc
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEM0_ADD_RETRIES` | `3` | Retry attempts for `memory.add()` |
+| `MEM0_ADD_RETRIES` | `3` | Retry attempts for `memory.add()` on exception |
 | `MEM0_ADD_RETRY_DELAY_MS` | `250` | Delay between retries (ms) |
 | `MEM0_HISTORY_DB_PATH` | `/tmp/history.db` | Mem0-internal dedup state — ephemeral, not needed for analytics |
 

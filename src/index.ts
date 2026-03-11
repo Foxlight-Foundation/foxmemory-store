@@ -370,6 +370,41 @@ function captureGraphLinks(result: any, userId?: string) {
 const ADD_RETRIES = Number(process.env.MEM0_ADD_RETRIES || 3);
 const ADD_RETRY_DELAY_MS = Number(process.env.MEM0_ADD_RETRY_DELAY_MS || 250);
 
+// ── Pre-flight write gate ─────────────────────────────────────────────────────
+// Writes that are too short or match a skip pattern are returned as NONE
+// immediately, before touching any LLM. Zero cost, zero latency.
+//
+// MEM0_MIN_INPUT_CHARS — skip writes whose total message content is below this
+//   threshold (default 20). Catches single-word system signals.
+// MEM0_SKIP_PATTERNS — comma-separated regex patterns (case-insensitive).
+//   Any message whose combined content matches any pattern is skipped.
+//   Default catches common heartbeat/protocol signals.
+const MIN_INPUT_CHARS = Number(process.env.MEM0_MIN_INPUT_CHARS ?? 20);
+const SKIP_PATTERNS: RegExp[] = (() => {
+  const defaults = [
+    "\\bHEARTBEAT_OK\\b",
+    "\\bHEARTBEAT\\b",
+    "^\\s*\\[\\[.*?\\]\\]\\s*$",   // bare [[tag]] messages
+    "^\\s*PING\\s*$",
+    "^\\s*PONG\\s*$",
+    "^\\s*OK\\s*$",
+  ];
+  const custom = (process.env.MEM0_SKIP_PATTERNS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+  return [...defaults, ...custom].map(p => new RegExp(p, "i"));
+})();
+
+const shouldSkipWrite = (messages: Array<{ role: string; content: string }>): string | null => {
+  const combined = messages.map(m => m.content).join(" ");
+  if (combined.length < MIN_INPUT_CHARS) return `content_too_short (${combined.length} < ${MIN_INPUT_CHARS} chars)`;
+  for (const pat of SKIP_PATTERNS) {
+    if (pat.test(combined)) return `matched_skip_pattern (${pat.source})`;
+  }
+  return null;
+};
+
 async function addWithRetries(
   messages: Array<{ role: string; content: string }>,
   opts: { userId?: string; runId?: string; metadata?: Record<string, unknown> }
@@ -767,6 +802,20 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
   const messages = body.messages?.length
     ? body.messages
     : [{ role: "user", content: String(body.text || "") }];
+
+  // Pre-flight gate: skip writes that are obviously not worth processing
+  const skipReason = shouldSkipWrite(messages);
+  if (skipReason) {
+    console.log(`[write-gate] skipped write: ${skipReason}`);
+    runtimeStats.writesByMode.infer += 1;
+    runtimeStats.memoryEvents.NONE += 1;
+    return {
+      mode: "skipped",
+      skip_reason: skipReason,
+      result: { results: [] },
+      decisions: null,
+    };
+  }
 
   let inferResult: any = { results: [] };
   let rawResult: any = null;

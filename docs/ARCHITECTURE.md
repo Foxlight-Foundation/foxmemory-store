@@ -90,6 +90,20 @@ Tables in `FOXMEMORY_ANALYTICS_DB_PATH`:
 - **Decision observability** — every write response includes `decisions` (extractedFacts, candidates, actions with reasons). Write events are persisted to SQLite with per-row `reason`, queryable via `GET /v2/write-events`. Primary debugging tool for unexpected DELETE/UPDATE behavior.
 - **Analytics are self-contained** — no external analytics service; SQLite is enough for a homelab. The DB path should be on a persistent volume.
 - **Graph is optional** — leave `NEO4J_URL` unset to disable. Zero overhead when disabled.
+- **Write gate (pre-flight filter)** — regex/length check runs before any LLM call. Drops obvious low-value writes (heartbeats, protocol signals, very short messages) at zero cost. Configurable via `MEM0_MIN_INPUT_CHARS` and `MEM0_SKIP_PATTERNS`. This is a blunt instrument — see "Future: write routing" below.
+
+## Future: write routing
+
+The write gate is intentionally dumb — regex and length only. It catches the obvious cases (heartbeat signals, system tokens) but cannot reason about semantic value.
+
+The right long-term answer is a **lightweight write router**: a model small enough to run in single-digit milliseconds on local hardware that classifies incoming content as worth processing vs. not, before the full 4-LLM pipeline runs.
+
+Candidates worth evaluating when local inference is available:
+- **Embedding cosine distance to a "junk" centroid** — build a small labeled set of low-value writes, compute their centroid, reject anything within N distance. ~1ms, no model load.
+- **Tiny classification model** (e.g. `smollm2:135m`, `phi-3-mini`, `qwen2.5:0.5b`) — binary classifier prompt: "Is this worth remembering long-term? yes/no". At ~135M params these run in <100ms on an M4.
+- **Heuristic scoring** — token count, information density (unique nouns/verbs ratio), presence of named entities — no model at all, but better than regex.
+
+The write gate's `shouldSkipWrite()` function is the extension point. When a router is ready, it replaces or augments that function.
 
 ## Operational gotchas
 
