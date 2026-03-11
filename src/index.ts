@@ -379,7 +379,7 @@ const ADD_RETRY_DELAY_MS = Number(process.env.MEM0_ADD_RETRY_DELAY_MS || 250);
 // MEM0_SKIP_PATTERNS — comma-separated regex patterns (case-insensitive).
 //   Any message whose combined content matches any pattern is skipped.
 //   Default catches common heartbeat/protocol signals.
-const MIN_INPUT_CHARS = Number(process.env.MEM0_MIN_INPUT_CHARS ?? 20);
+const MIN_INPUT_CHARS = Number(process.env.MEM0_MIN_INPUT_CHARS ?? 1);
 const SKIP_PATTERNS: RegExp[] = (() => {
   const defaults = [
     "\\bHEARTBEAT_OK\\b",
