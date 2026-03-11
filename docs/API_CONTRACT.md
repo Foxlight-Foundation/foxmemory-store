@@ -5,7 +5,7 @@ This document is the canonical HTTP contract for `foxmemory-store`.
 - Service default port: `8082`
 - Example base URLs:
   - local: `http://localhost:8082`
-  - R720 LAN: `http://192.168.0.118:8082`
+  - self-hosted LAN: `http://<your-host>:8082`
 
 ## Conventions
 
@@ -149,7 +149,7 @@ Success response:
         }
       ]
     },
-    "relations": [{ "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }],
+    "relations": [{ "source": "fox", "relationship": "prefers", "destination": "concise_answers" }],
     "added_entities": []
   }
 }
@@ -205,7 +205,7 @@ Success:
   "ok": true,
   "data": {
     "results": [],
-    "relations": [{ "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }]
+    "relations": [{ "source": "fox", "relationship": "prefers", "destination": "concise_answers" }]
   },
   "meta": { "scope": "direct", "count": 0 }
 }
@@ -671,8 +671,8 @@ Node objects have this shape (`embedding` is always stripped):
 {
   "id": "4:abc123:0",
   "labels": ["person"],
-  "name": "thomas",
-  "properties": { "user_id": "user@example.com", "created": "2026-03-07T..." }
+  "name": "alice",
+  "properties": { "user_id": "demo-user", "created": "2026-03-07T..." }
 }
 ```
 
@@ -834,7 +834,7 @@ Success:
   "ok": true,
   "data": {
     "relations": [
-      { "source": "thomas", "relationship": "prefers", "destination": "concise_answers" }
+      { "source": "fox", "relationship": "prefers", "destination": "concise_answers" }
     ],
     "count": 1
   },

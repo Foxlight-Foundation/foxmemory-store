@@ -73,7 +73,7 @@ curl -s http://localhost:8082/health | jq .
 
 ### Analytics DB
 
-- `FOXMEMORY_ANALYTICS_DB_PATH` — default `/data/foxmemory-analytics.db`. **Must be on a mounted volume** or stats reset on restart. On R720 use `/qdrant/storage/foxmemory-analytics.db`.
+- `FOXMEMORY_ANALYTICS_DB_PATH` — default `/data/foxmemory-analytics.db`. **Must be on a mounted volume** or stats reset on restart. Override to any persistent path on your host (e.g. `/qdrant/storage/foxmemory-analytics.db` if Qdrant storage is already mounted there).
 
 ### Graph memory (Neo4j — optional)
 

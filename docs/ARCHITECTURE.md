@@ -79,7 +79,7 @@ Tables in `FOXMEMORY_ANALYTICS_DB_PATH`:
 - `graph_events` — one row per graph write, includes `entities_added`, `relations_added`.
 - `config` — key/value store for persisted runtime config (custom prompts).
 
-**Must be on a mounted volume** — the default path `/data/foxmemory-analytics.db` requires a volume at `/data`. On R720 use `/qdrant/storage/foxmemory-analytics.db`.
+**Must be on a mounted volume** — the default path `/data/foxmemory-analytics.db` requires a volume at `/data`. Override `FOXMEMORY_ANALYTICS_DB_PATH` to point at a persistent volume path on your host (e.g. `/qdrant/storage/foxmemory-analytics.db` if Qdrant storage is already mounted there).
 
 ## Design choices
 
