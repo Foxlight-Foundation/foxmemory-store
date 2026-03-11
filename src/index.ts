@@ -2275,6 +2275,26 @@ app.get("/v2/graph/stats", async (req, res) => {
   }
 });
 
+// POST /v2/graph/admin/wipe — delete ALL nodes and edges from Neo4j
+// Destructive and irreversible. Requires header X-Admin-Action: wipe-graph.
+app.post("/v2/graph/admin/wipe", async (req, res) => {
+  if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
+  if (req.headers["x-admin-action"] !== "wipe-graph") {
+    return v2Err(res, 400, "BAD_REQUEST", "Missing required header: X-Admin-Action: wipe-graph");
+  }
+  try {
+    return await graphSession(async (session) => {
+      const countRes = await session.run("MATCH (n) RETURN count(n) AS c");
+      const nodesBefore = neo4jInt(countRes.records[0]?.get("c"));
+      await session.run("MATCH (n) DETACH DELETE n");
+      console.warn(`[graph/admin/wipe] wiped ${nodesBefore} nodes from Neo4j`);
+      return v2Ok(res, { wiped: true, nodes_deleted: nodesBefore });
+    });
+  } catch (err: any) {
+    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+  }
+});
+
 // ── model config + catalog ────────────────────────────────────────────────
 
 const MODEL_ROLES = ["llm", "graph_llm"] as const;
