@@ -277,7 +277,10 @@ Success:
 
 ### `DELETE /v2/memories/:id`
 
-Success:
+Query params:
+- `cascade_graph=true` — opt-in: also delete orphaned Neo4j nodes/edges that were produced by this memory write. **Off by default.** Only acts if the vector↔graph link table has entries for this memory — if no links exist, cascade is a no-op regardless of the flag.
+
+Success (without cascade):
 
 ```json
 {
@@ -288,6 +291,24 @@ Success:
   }
 }
 ```
+
+Success (with `?cascade_graph=true` and graph enabled):
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "...",
+    "deleted": true,
+    "graph_cascade": {
+      "edges_deleted": 1,
+      "nodes_deleted": 0
+    }
+  }
+}
+```
+
+`graph_cascade` appears only when `cascade_graph=true` and graph is enabled. Counts reflect only elements with no other vector memories backing them. Cascade failures are logged server-side but do not fail the response — the vector store is the source of truth.
 
 ## 2.7 Batch Delete (Forget)
 
@@ -300,14 +321,16 @@ Request body:
 ```json
 {
   "memory_ids": ["uuid-1", "uuid-2", "uuid-3"],
+  "cascade_graph": false,
   "idempotency_key": "optional-stable-key"
 }
 ```
 
-Validation:
+Fields:
 - `memory_ids`: required, array of UUIDs, min 1, max 1000.
+- `cascade_graph`: optional boolean, default `false`. When `true` and graph is enabled, deletes orphaned Neo4j nodes/edges for each memory — but only those with no other vector memories backing them, and only if the link table has entries. Safe to pass as `true` when in doubt; it will not touch graph elements it cannot trace.
 
-Success:
+Success (without cascade):
 
 ```json
 {
@@ -315,14 +338,29 @@ Success:
   "data": {
     "deleted": ["uuid-1", "uuid-2"],
     "count": 2
-  },
-  "meta": { "version": "v2" }
+  }
+}
+```
+
+Success (with `cascade_graph: true` and graph enabled):
+
+```json
+{
+  "ok": true,
+  "data": {
+    "deleted": ["uuid-1", "uuid-2"],
+    "count": 2,
+    "graph_cascade": {
+      "edges_deleted": 3,
+      "nodes_deleted": 1
+    }
+  }
 }
 ```
 
 Notes:
 - Idempotency supported (same key replays first response).
-- Each ID is deleted sequentially to avoid overwhelming Qdrant.
+- Each ID is deleted sequentially; cascade graph cleanup runs per-ID before moving to the next.
 - IDs that do not exist are silently skipped by mem0.
 
 ## 2.8 Memory Stats (Dashboard)

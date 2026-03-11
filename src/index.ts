@@ -1062,15 +1062,72 @@ app.delete("/v2/memories/:id", async (req, res) => {
     runtimeStats.requests.delete += 1;
     const t0 = Date.now();
     await memory.get(req.params.id);
-    await memory.delete(req.params.id);
+
+    const memId = req.params.id;
+    // Cascade is opt-in — caller must explicitly pass ?cascade_graph=true
+    const cascadeRequested = req.query.cascade_graph === "true";
+
+    let cascadeEdgeIds: string[] = [];
+    let cascadeNodeIds: string[] = [];
+    if (cascadeRequested && GRAPH_ENABLED && analyticsDb?.ready) {
+      const linkedNodeIds = analyticsDb.getLinkedNodeIds(memId);
+      const linkedEdgeIds = analyticsDb.getLinkedEdgeIds(memId);
+      // Only proceed if the link table has data for this memory — no links = no cascade
+      if (linkedNodeIds.length || linkedEdgeIds.length) {
+        cascadeEdgeIds = linkedEdgeIds.filter(
+          (eid) => analyticsDb!.otherMemoriesForEdge(eid, memId) === 0
+        );
+        cascadeNodeIds = linkedNodeIds.filter(
+          (nid) => analyticsDb!.otherMemoriesForNode(nid, memId) === 0
+        );
+      }
+    }
+
+    await memory.delete(memId);
+
+    // Cascade: delete orphaned Neo4j edges then isolated nodes
+    if (cascadeEdgeIds.length || cascadeNodeIds.length) {
+      try {
+        await graphSession(async (session) => {
+          if (cascadeEdgeIds.length) {
+            await session.run(
+              "UNWIND $ids AS eid MATCH ()-[r]-() WHERE elementId(r) = eid DELETE r",
+              { ids: cascadeEdgeIds }
+            );
+          }
+          if (cascadeNodeIds.length) {
+            // Only delete nodes that are now truly isolated (no remaining relationships)
+            await session.run(
+              "UNWIND $ids AS nid MATCH (n) WHERE elementId(n) = nid AND NOT (n)--() DELETE n",
+              { ids: cascadeNodeIds }
+            );
+          }
+        });
+      } catch (graphErr: any) {
+        console.warn("[cascade-delete] graph cleanup failed:", graphErr?.message || graphErr);
+      }
+    }
+
+    // Always clean up the link table row for this memory
+    analyticsDb?.deleteLinksForMemory(memId);
+
     runtimeStats.memoryEvents.DELETE += 1;
     analyticsDb?.recordWriteResults({
-      results: [{ id: req.params.id, event: "DELETE" }],
+      results: [{ id: memId, event: "DELETE" }],
       latencyMs: Date.now() - t0,
       inputChars: 0,
       inferMode: false,
     });
-    const body = { ok: true, data: { id: req.params.id, deleted: true } };
+    const body = {
+      ok: true,
+      data: {
+        id: memId,
+        deleted: true,
+        graph_cascade: cascadeRequested && GRAPH_ENABLED
+          ? { edges_deleted: cascadeEdgeIds.length, nodes_deleted: cascadeNodeIds.length }
+          : undefined,
+      },
+    };
     const status = 200;
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
     return res.status(status).json(body);
@@ -2337,6 +2394,7 @@ app.put("/v2/config/graph-prompt", (req, res) => {
 
 const v2ForgetSchema = z.object({
   memory_ids: z.array(z.string().uuid()).min(1).max(1000),
+  cascade_graph: z.boolean().optional().default(false),
   idempotency_key: z.string().trim().min(1).max(255).optional(),
 });
 
@@ -2349,15 +2407,68 @@ app.post("/v2/memories/forget", async (req, res) => {
     if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
-    const { memory_ids } = parsed.data;
+    const { memory_ids, cascade_graph } = parsed.data;
     const deleted: string[] = [];
+    let totalEdgesDeleted = 0;
+    let totalNodesDeleted = 0;
+
     for (const id of memory_ids) {
+      // Cascade is opt-in and only acts if the link table has data for this memory
+      let cascadeEdgeIds: string[] = [];
+      let cascadeNodeIds: string[] = [];
+      if (cascade_graph && GRAPH_ENABLED && analyticsDb?.ready) {
+        const linkedNodeIds = analyticsDb.getLinkedNodeIds(id);
+        const linkedEdgeIds = analyticsDb.getLinkedEdgeIds(id);
+        if (linkedNodeIds.length || linkedEdgeIds.length) {
+          cascadeEdgeIds = linkedEdgeIds.filter(
+            (eid) => analyticsDb!.otherMemoriesForEdge(eid, id) === 0
+          );
+          cascadeNodeIds = linkedNodeIds.filter(
+            (nid) => analyticsDb!.otherMemoriesForNode(nid, id) === 0
+          );
+        }
+      }
+
       await memory.delete(id);
+
+      if (cascadeEdgeIds.length || cascadeNodeIds.length) {
+        try {
+          await graphSession(async (session) => {
+            if (cascadeEdgeIds.length) {
+              await session.run(
+                "UNWIND $ids AS eid MATCH ()-[r]-() WHERE elementId(r) = eid DELETE r",
+                { ids: cascadeEdgeIds }
+              );
+            }
+            if (cascadeNodeIds.length) {
+              await session.run(
+                "UNWIND $ids AS nid MATCH (n) WHERE elementId(n) = nid AND NOT (n)--() DELETE n",
+                { ids: cascadeNodeIds }
+              );
+            }
+          });
+          totalEdgesDeleted += cascadeEdgeIds.length;
+          totalNodesDeleted += cascadeNodeIds.length;
+        } catch (graphErr: any) {
+          console.warn(`[cascade-delete] graph cleanup failed for ${id}:`, graphErr?.message || graphErr);
+        }
+      }
+
+      analyticsDb?.deleteLinksForMemory(id);
       deleted.push(id);
     }
     runtimeStats.requests.delete += deleted.length;
 
-    const body = { ok: true, data: { deleted, count: deleted.length } };
+    const body = {
+      ok: true,
+      data: {
+        deleted,
+        count: deleted.length,
+        graph_cascade: cascade_graph && GRAPH_ENABLED
+          ? { edges_deleted: totalEdgesDeleted, nodes_deleted: totalNodesDeleted }
+          : undefined,
+      },
+    };
     if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, 200, body);
     return res.json(body);
   } catch (err: any) {
@@ -2623,9 +2734,10 @@ const V2_OPENAPI_SPEC = {
         operationId: "v2ForgetMemories",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["memory_ids"], properties: {
           memory_ids: { type: "array", items: { type: "string", format: "uuid" }, minItems: 1, maxItems: 1000 },
+          cascade_graph: { type: "boolean", default: false, description: "Opt-in: delete orphaned Neo4j nodes/edges linked to each memory. No-op if link table has no entries for a given memory." },
           idempotency_key: { type: "string" },
         } } } } },
-        responses: { "200": { description: "{ deleted: uuid[], count: number }" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
+        responses: { "200": { description: "{ deleted: uuid[], count: number, graph_cascade?: { edges_deleted, nodes_deleted } }" }, "400": { description: "Validation error" }, "409": { description: "Idempotency conflict" } },
       },
     },
     "/config/models": {
@@ -2833,7 +2945,7 @@ const V2_OPENAPI_SPEC = {
     "/memories/{id}": {
       get: { summary: "Get memory by ID", operationId: "v2GetMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Memory object" }, "404": { description: "Not found" } } },
       put: { summary: "Update memory text", operationId: "v2UpdateMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Updated" }, "404": { description: "Not found" }, "409": { description: "Idempotency conflict" } } },
-      delete: { summary: "Delete memory by ID", operationId: "v2DeleteMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } } },
+      delete: { summary: "Delete memory by ID", operationId: "v2DeleteMemory", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "cascade_graph", in: "query", required: false, schema: { type: "boolean", default: false }, description: "Opt-in: delete orphaned Neo4j nodes/edges linked to this memory. No-op if link table has no entries." }], responses: { "200": { description: "{ deleted: true, graph_cascade?: { edges_deleted, nodes_deleted } } — graph_cascade present only when cascade_graph=true and graph enabled" }, "404": { description: "Not found" } } },
     },
   },
 } as const;
