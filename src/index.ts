@@ -376,9 +376,15 @@ async function addWithRetries(
 ) {
   let last: any = { results: [] };
   for (let attempt = 1; attempt <= Math.max(1, ADD_RETRIES); attempt++) {
-    last = await memory.add(messages, { ...opts, output_format: "v1.1" } as any);
-    if (Array.isArray(last?.results) && last.results.length > 0) return last;
-    if (attempt < ADD_RETRIES) await new Promise((r) => setTimeout(r, ADD_RETRY_DELAY_MS));
+    try {
+      last = await memory.add(messages, { ...opts, output_format: "v1.1" } as any);
+      // Empty results is a valid NONE outcome — do not retry. Only retry on thrown exceptions.
+      return last;
+    } catch (err: any) {
+      if (attempt >= ADD_RETRIES) throw err;
+      console.warn(`[addWithRetries] attempt ${attempt} threw, retrying in ${ADD_RETRY_DELAY_MS}ms:`, err?.message || err);
+      await new Promise((r) => setTimeout(r, ADD_RETRY_DELAY_MS));
+    }
   }
   return last;
 }
