@@ -1511,12 +1511,19 @@ class FoxAnalyticsDB {
       `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode, call_id, reason, extracted_facts_json, candidates_json)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    // If mem0 returned no results, record a single NONE row
-    const rows = opts.results.length ? opts.results : [null];
+    // If mem0 returned no results, try to use NONE entries from decisions.actions (which carry
+    // the LLM's per-fact reason). Falls back to a single null row for write-gate drops or
+    // cases where decisions are unavailable.
+    const noneActions = opts.results.length === 0
+      ? (opts.decisions?.actions || []).filter((a: any) => String(a?.event || "").toUpperCase() === "NONE")
+      : [];
+    const rows = opts.results.length ? opts.results : noneActions.length ? noneActions : [null];
     for (const r of rows) {
       const event = r ? String(r?.metadata?.event || r?.event || "NONE").toUpperCase() : "NONE";
-      const memText = r?.memory ? String(r.memory).slice(0, 500) : null;
-      const reason = r?.metadata?.reason ? String(r.metadata.reason).slice(0, 500) : null;
+      const memText = r?.memory ? String(r.memory).slice(0, 500) : (r?.text ? String(r.text).slice(0, 500) : null);
+      const reason = r?.metadata?.reason
+        ? String(r.metadata.reason).slice(0, 500)
+        : r?.reason ? String(r.reason).slice(0, 500) : null;
       try {
         stmt.run(
           crypto.randomUUID(), ts, event, r?.id ?? null,
