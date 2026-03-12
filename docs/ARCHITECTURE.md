@@ -37,6 +37,25 @@ Client  →  POST /v2/memories
 
 When graph is disabled: LLM Calls 3+4 and Neo4j write are skipped. `relations` and `added_entities` are omitted from the response.
 
+### Async mode (`async: true`)
+
+```
+Client  →  POST /v2/memories  { ..., async: true }
+           │
+           ├─ Zod validation
+           ├─ Idempotency check — persisted BEFORE returning 202
+           ├─ 202 Accepted  → { ok, data: { job_id, status: "pending" } }
+           │
+           └─ Background:
+                ├─ memory.add() [same pipeline as sync]
+                ├─ analyticsDb.recordWriteResults() / recordGraphWrite()
+                └─ Job status updated to "completed" or "failed"
+
+Client  →  GET /v2/jobs/:id  → { status, result, error, created_at, completed_at }
+```
+
+Async writes prevent the gateway from blocking on long graph writes (which can take 10s+ with graph enabled). The idempotency record is persisted before returning 202 so retries during processing don't create duplicates.
+
 `decisions` is always present and contains the full observability trace:
 - `extractedFacts` — Call 1 output (facts worth remembering)
 - `candidates` — existing memories retrieved from Qdrant for Call 2 comparison
@@ -90,6 +109,8 @@ Tables in `FOXMEMORY_ANALYTICS_DB_PATH`:
 - **Decision observability** — every write response includes `decisions` (extractedFacts, candidates, actions with reasons). Write events are persisted to SQLite with per-row `reason`, queryable via `GET /v2/write-events`. Primary debugging tool for unexpected DELETE/UPDATE behavior.
 - **Analytics are self-contained** — no external analytics service; SQLite is enough for a homelab. The DB path should be on a persistent volume.
 - **Graph is optional** — leave `NEO4J_URL` unset to disable. Zero overhead when disabled.
+- **Runtime-configurable** — prompts, LLM models, capture window, and role names are all configurable via `PUT /v2/config/*` endpoints. Values persist to SQLite and restore on startup. Env vars set initial defaults; API overrides take precedence.
+- **Role names** — `roleNames` config maps message roles to real names (e.g., `{ user: "Thomas", assistant: "Kite" }`) so the extraction LLM attributes memories correctly instead of "User prefers...".
 - **Write gate (pre-flight filter)** — regex/length check runs before any LLM call. Drops obvious low-value writes (heartbeats, protocol signals, very short messages) at zero cost. Configurable via `MEM0_MIN_INPUT_CHARS` and `MEM0_SKIP_PATTERNS`. This is a blunt instrument — see "Future: write routing" below.
 
 ## Future: write routing

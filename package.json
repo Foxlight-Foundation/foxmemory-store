@@ -10,7 +10,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@foxlight-foundation/mem0ai": "^2.2.4-fox.adcbcb24",
+    "@foxlight-foundation/mem0ai": "^2.3.0-fox.ad3b587f",
     "express": "^4.21.2",
     "zod": "^3.24.2"
   },

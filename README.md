@@ -215,7 +215,7 @@ Writes that fail the gate are returned immediately as `mode: "skipped"` — no L
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEM0_MIN_INPUT_CHARS` | `20` | Skip writes whose total message content is below this character count |
+| `MEM0_MIN_INPUT_CHARS` | `1` | Skip writes whose total message content is below this character count |
 | `MEM0_SKIP_PATTERNS` | _(see below)_ | Comma-separated regex patterns (case-insensitive). Any write whose combined content matches is skipped. |
 
 Default skip patterns (always active): `HEARTBEAT_OK`, `HEARTBEAT`, bare `[[tag]]` messages, `PING`, `PONG`, `OK`.
