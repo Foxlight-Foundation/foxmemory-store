@@ -996,11 +996,23 @@ const handleV2Write = async (
       };
       asyncJobs.set(jobId, job);
 
+      // Persist idempotency record NOW with the 202 response, before the
+      // background work starts. This prevents duplicate writes if the client
+      // retries the same idempotency key while the job is still running.
+      const acceptedBody = {
+        ok: true,
+        data: { job_id: jobId, status: "pending" },
+        meta: { version: "v2", async: true },
+      };
+      if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, 202, acceptedBody);
+
       // Fire and forget — process in background
       (async () => {
         job.status = "running";
         try {
-          const { body } = await executeWriteAndRecord(parsed.data, idem);
+          // Pass a no-op idem so executeWriteAndRecord doesn't try to persist again
+          const noopIdem = { type: "none" as const };
+          const { body } = await executeWriteAndRecord(parsed.data, noopIdem);
           job.status = "completed";
           job.completed_at = new Date().toISOString();
           job.result = body.data;
@@ -1012,11 +1024,7 @@ const handleV2Write = async (
         }
       })();
 
-      return res.status(202).json({
-        ok: true,
-        data: { job_id: jobId, status: "pending" },
-        meta: { version: "v2", async: true },
-      });
+      return res.status(202).json(acceptedBody);
     }
 
     // ── Sync mode (default): block until write completes ──
