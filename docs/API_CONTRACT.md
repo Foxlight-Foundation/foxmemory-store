@@ -1016,6 +1016,28 @@ Success:
 }
 ```
 
+## 2.12a Graph Admin
+
+### `POST /v2/graph/admin/wipe`
+
+**Destructive and irreversible.** Deletes ALL nodes and edges from Neo4j for the entire graph. Requires header:
+
+```
+X-Admin-Action: wipe-graph
+```
+
+Returns `400 BAD_REQUEST` if the header is missing or graph memory is not enabled.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "wiped": true,
+    "nodes_deleted": 2437
+  }
+}
+```
+
 ---
 
 ## 2.13 API Docs & Spec
@@ -1163,6 +1185,22 @@ Common v2 titles:
 - Role names:
   - `FOXMEMORY_ROLE_USER_NAME` — name for the "user" role in extraction context (default: `"user"`). Overridable at runtime via `PUT /v2/config/roles`.
   - `FOXMEMORY_ROLE_ASSISTANT_NAME` — name for the "assistant" role in extraction context (default: `"assistant"`). Overridable at runtime via `PUT /v2/config/roles`.
+- Write gate:
+  - `MEM0_MIN_INPUT_CHARS` — minimum total message chars to process a write (default: `1`). Messages below this are skipped.
+  - `MEM0_SKIP_PATTERNS` — comma-separated regex patterns. Writes matching any pattern are skipped. Appended to built-in defaults (`HEARTBEAT`, `PING`, etc.).
+- Prompt defaults (overridable at runtime via `PUT /v2/config/*`):
+  - `MEM0_CUSTOM_PROMPT` — initial Call 1 (fact extraction) prompt.
+  - `MEM0_CUSTOM_UPDATE_PROMPT` — initial Call 2 (ADD/UPDATE/DELETE/NONE) prompt.
+  - `MEM0_GRAPH_CUSTOM_PROMPT` — initial graph entity/relation extraction prompt.
+- Retries:
+  - `MEM0_ADD_RETRIES` — number of retries for `memory.add()` calls (default: `3`).
+  - `MEM0_ADD_RETRY_DELAY_MS` — delay between retries in ms (default: `250`).
+- Idempotency:
+  - `IDEMPOTENCY_TTL_MS` — how long idempotency keys are retained (default: `300000` = 5 min).
+- Analytics:
+  - `FOXMEMORY_ANALYTICS_DB_PATH` — path to SQLite analytics DB (default: `/data/foxmemory-analytics.db`). Must be on a mounted volume.
+- Internal:
+  - `MEM0_HISTORY_DB_PATH` — path to mem0's internal history DB (default: `/tmp/history.db`). Ephemeral.
 
 When graph memory is enabled:
 - Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment). Write responses include a top-level `relations` array (graph triples added by this call).
