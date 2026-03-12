@@ -2104,6 +2104,12 @@ try {
     console.log(`[config] restored graph llm model from DB: ${effectiveGraphLlmModel}`);
   }
 
+  // Recreate Memory instance with all restored config (prompts, role names, models).
+  // The initial createMemory() at top-of-file runs before DB restore, so without this
+  // the memory instance would use env-var defaults until a PUT /v2/config/* call.
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  console.log("[config] memory instance recreated with restored DB config");
+
 } catch (e) {
   console.warn("[analytics] DB unavailable (set FOXMEMORY_ANALYTICS_DB_PATH to a writable path):", String(e));
 }
