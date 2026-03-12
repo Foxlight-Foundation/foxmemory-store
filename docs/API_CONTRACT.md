@@ -741,8 +741,8 @@ Runtime-configurable auto-capture settings. Controls how many messages the memor
 {
   "ok": true,
   "data": {
-    "capture_message_limit": 10,
-    "default": 10,
+    "capture_message_limit": 5,
+    "default": 5,
     "source": "default",
     "persisted": true
   }
@@ -767,13 +767,13 @@ Request body:
 
 ### `DELETE /v2/config/capture`
 
-Clear the persisted override — reverts to env var or default (10).
+Clear the persisted override — reverts to env var or default (5).
 
 ```json
 {
   "ok": true,
   "data": {
-    "capture_message_limit": 10,
+    "capture_message_limit": 5,
     "source": "default",
     "persisted": true
   }
@@ -1105,7 +1105,7 @@ Common v2 titles:
   - `ASYNC_JOB_TTL_MS` — how long completed/failed async jobs stay in memory (default: `3600000` = 1 hour).
   - `ASYNC_JOB_MAX` — max concurrent in-flight async jobs before `429` (default: `100`).
 - Capture config:
-  - `FOXMEMORY_CAPTURE_MESSAGE_LIMIT` — initial default for auto-capture message window (default: `10`). Overridable at runtime via `PUT /v2/config/capture`.
+  - `FOXMEMORY_CAPTURE_MESSAGE_LIMIT` — initial default for auto-capture message window (default: `5`). Overridable at runtime via `PUT /v2/config/capture`.
 
 When graph memory is enabled:
 - Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment). Write responses include a top-level `relations` array (graph triples added by this call).

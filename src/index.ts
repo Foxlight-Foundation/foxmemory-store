@@ -159,7 +159,7 @@ let currentCustomGraphPrompt: string | null =
 // the memory plugin should send per auto-capture write (agent_end hook).
 // Fewer messages = fewer entities = less graph thrashing = faster writes.
 // Set via PUT /v2/config/capture. Persisted to SQLite. Env var sets the initial default.
-const DEFAULT_CAPTURE_MESSAGE_LIMIT = 10;
+const DEFAULT_CAPTURE_MESSAGE_LIMIT = 5;
 let captureMessageLimit: number =
   Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
 
@@ -2904,7 +2904,7 @@ const V2_OPENAPI_SPEC = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" }, description: "Job ID returned by an async write (202 response)." }],
         responses: {
           "200": { description: "Job completed or failed", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, data: { type: "object", properties: { job_id: { type: "string" }, status: { type: "string", enum: ["completed", "failed"] }, created_at: { type: "string", format: "date-time" }, completed_at: { type: "string", format: "date-time", nullable: true }, result: { type: "object", description: "Full write result (same shape as sync 200). Present when status=completed." }, error: { type: "string", description: "Error message. Present when status=failed.", nullable: true } } } } } } } },
-          "202": { description: "Job still in progress (pending or running)", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, data: { type: "object", properties: { job_id: { type: "string" }, status: { type: "string", enum: ["pending", "running"] }, created_at: { type: "string", format: "date-time" }, completed_at: { type: "null" } } } } } } } },
+          "202": { description: "Job still in progress (pending or running)", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, data: { type: "object", properties: { job_id: { type: "string" }, status: { type: "string", enum: ["pending", "running"] }, created_at: { type: "string", format: "date-time" }, completed_at: { type: "string", format: "date-time", nullable: true } } } } } } } },
           "404": { description: "Job not found or expired" },
         },
       },
