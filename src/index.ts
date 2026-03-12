@@ -1631,7 +1631,7 @@ class FoxAnalyticsDB {
 
       // Recent activity (last 20 write events, useful for activity feed)
       const recent = this.db.prepare(`
-        SELECT ts, event_type, memory_id, user_id, run_id, output_text, latency_ms, infer_mode
+        SELECT ts, event_type, memory_id, user_id, run_id, output_text, reason, latency_ms, infer_mode
         FROM write_events ORDER BY ts DESC LIMIT 20
       `).all() as any[];
 
@@ -1694,7 +1694,7 @@ class FoxAnalyticsDB {
           memoryId: r.memory_id,
           userId: r.user_id,
           runId: r.run_id,
-          preview: r.output_text ?? null,
+          preview: r.output_text ?? r.reason ?? null,
           latencyMs: r.latency_ms,
           inferMode: r.infer_mode === 1,
         })),
