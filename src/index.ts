@@ -4,6 +4,7 @@ import { Memory } from "@foxlight-foundation/mem0ai/oss";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -154,6 +155,14 @@ let currentCustomUpdatePrompt: string | null =
 let currentCustomGraphPrompt: string | null =
   process.env.MEM0_GRAPH_CUSTOM_PROMPT || null;
 
+// Runtime-configurable auto-capture message limit. Controls how many messages
+// the memory plugin should send per auto-capture write (agent_end hook).
+// Fewer messages = fewer entities = less graph thrashing = faster writes.
+// Set via PUT /v2/config/capture. Persisted to SQLite. Env var sets the initial default.
+const DEFAULT_CAPTURE_MESSAGE_LIMIT = 10;
+let captureMessageLimit: number =
+  Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
+
 function ensureJsonWordInMessages(messages: any[]): any[] {
   const hasJsonWord = messages.some((m: any) =>
     typeof m?.content === "string" && /\bjson\b/i.test(m.content)
@@ -299,6 +308,7 @@ const v2WriteSchema = z
     metadata: z.record(z.unknown()).optional(),
     infer_preferred: z.boolean().optional(),
     fallback_raw: z.boolean().optional(),
+    async: z.boolean().optional(),
     idempotency_key: z.string().trim().min(1).max(255).optional()
   })
   .refine((v) => Boolean(v.user_id || v.run_id), {
@@ -370,6 +380,42 @@ function captureGraphLinks(result: any, userId?: string) {
 const ADD_RETRIES = Number(process.env.MEM0_ADD_RETRIES || 3);
 const ADD_RETRY_DELAY_MS = Number(process.env.MEM0_ADD_RETRY_DELAY_MS || 250);
 
+// ── Async write job queue ─────────────────────────────────────────────────────
+// When a write is submitted with `async: true`, the server returns 202 immediately
+// with a job_id. The write processes in the background and results are available
+// via GET /v2/jobs/:id. Jobs are kept in memory with a configurable TTL.
+//
+// This prevents the gateway from blocking for 10+ minutes while graph extraction
+// (entity embedding + Neo4j dedup scans) completes.
+//
+// ASYNC_JOB_TTL_MS — how long completed/failed jobs stay in the map (default 1h).
+// ASYNC_JOB_MAX — max concurrent in-flight jobs before new ones are rejected (default 100).
+const ASYNC_JOB_TTL_MS = Number(process.env.ASYNC_JOB_TTL_MS || 3_600_000);
+const ASYNC_JOB_MAX = Number(process.env.ASYNC_JOB_MAX || 100);
+
+type AsyncJobStatus = "pending" | "running" | "completed" | "failed";
+
+interface AsyncJob {
+  id: string;
+  status: AsyncJobStatus;
+  created_at: string;
+  completed_at: string | null;
+  result: any | null;
+  error: string | null;
+}
+
+const asyncJobs = new Map<string, AsyncJob>();
+
+// Periodic cleanup of expired jobs (every 5 minutes)
+setInterval(() => {
+  const cutoff = Date.now() - ASYNC_JOB_TTL_MS;
+  for (const [id, job] of asyncJobs) {
+    if (job.completed_at && new Date(job.completed_at).getTime() < cutoff) {
+      asyncJobs.delete(id);
+    }
+  }
+}, 300_000).unref();
+
 // ── Pre-flight write gate ─────────────────────────────────────────────────────
 // Writes that are too short or match a skip pattern are returned as NONE
 // immediately, before touching any LLM. Zero cost, zero latency.
@@ -436,7 +482,7 @@ app.get("/health", (_req, res) => {
       time: BUILD_TIME
     },
     mem0: "oss",
-    llmModel: LLM_MODEL,
+    llmModel: effectiveLlmModel,
     embedModel: EMBED_MODEL,
     diagnostics: {
       authMode: AUTH_MODE,
@@ -444,7 +490,7 @@ app.get("/health", (_req, res) => {
       openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
       graphEnabled: GRAPH_ENABLED,
       neo4jUrl: NEO4J_URL,
-      graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
+      graphLlmModel: GRAPH_ENABLED ? effectiveGraphLlmModel : null,
     }
   });
 });
@@ -880,84 +926,128 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
   };
 }
 
-app.post("/v2/memory.write", async (req, res) => {
+// ── Shared write execution + analytics recording ────────────────────────────
+// Used by both /v2/memory.write and /v2/memories. Extracted to avoid duplication
+// and to support async mode where the write runs in the background.
+const executeWriteAndRecord = async (
+  parsed: z.infer<typeof v2WriteSchema>,
+  idem: ReturnType<typeof idempotencyPrecheck>,
+): Promise<{ status: number; body: any }> => {
+  const t0 = Date.now();
+  const out = await v2Write(parsed);
+  const latencyMs = Date.now() - t0;
+  analyticsDb?.recordWriteResults({
+    results: out.result?.results || [],
+    inputChars: inputCharsFromBody(parsed),
+    latencyMs,
+    inferMode: parsed.infer_preferred !== false,
+    decisions: (out as any).decisions ?? undefined,
+  });
+  if (GRAPH_ENABLED) {
+    const graphRelations: any[] = (out as any).relations || [];
+    const addedEntities: any[] = (out as any).added_entities || [];
+    analyticsDb?.recordGraphWrite({
+      user_id: parsed.user_id,
+      run_id: parsed.run_id,
+      entitiesAdded: addedEntities.length,
+      relationsAdded: graphRelations.length,
+      latencyMs,
+    });
+  }
+  const body = { ok: true, data: out };
+  const status = 200;
+  if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
+  return { status, body };
+};
+
+// ── Shared v2 write handler (sync or async) ─────────────────────────────────
+// When async=true, returns 202 with a job_id immediately and processes in
+// the background. The caller can poll GET /v2/jobs/:id for the result.
+const handleV2Write = async (
+  req: express.Request,
+  res: express.Response,
+  route: string,
+) => {
   try {
     const parsed = v2WriteSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
 
-    const idem = idempotencyPrecheck(req, "POST:/v2/memory.write", parsed.data);
+    const idem = idempotencyPrecheck(req, route, parsed.data);
     if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
     runtimeStats.requests.add += 1;
-    const t0 = Date.now();
-    const out = await v2Write(parsed.data);
-    const latencyMs = Date.now() - t0;
-    analyticsDb?.recordWriteResults({
-      results: out.result?.results || [],
-      inputChars: inputCharsFromBody(parsed.data),
-      latencyMs,
-      inferMode: parsed.data.infer_preferred !== false,
-      decisions: (out as any).decisions ?? undefined,
-    });
-    if (GRAPH_ENABLED) {
-      const graphRelations: any[] = (out as any).relations || [];
-      const addedEntities: any[] = (out as any).added_entities || [];
-      analyticsDb?.recordGraphWrite({
-        user_id: parsed.data.user_id,
-        run_id: parsed.data.run_id,
-        entitiesAdded: addedEntities.length,
-        relationsAdded: graphRelations.length,
-        latencyMs,
+
+    // ── Async mode: return 202 immediately, process in background ──
+    if (parsed.data.async) {
+      const inFlightCount = [...asyncJobs.values()].filter(j => j.status === "pending" || j.status === "running").length;
+      if (inFlightCount >= ASYNC_JOB_MAX) {
+        return v2Err(res, 429, "TOO_MANY_JOBS", `Max ${ASYNC_JOB_MAX} concurrent async jobs. Try again later.`);
+      }
+
+      const jobId = randomUUID();
+      const job: AsyncJob = {
+        id: jobId,
+        status: "pending",
+        created_at: new Date().toISOString(),
+        completed_at: null,
+        result: null,
+        error: null,
+      };
+      asyncJobs.set(jobId, job);
+
+      // Fire and forget — process in background
+      (async () => {
+        job.status = "running";
+        try {
+          const { body } = await executeWriteAndRecord(parsed.data, idem);
+          job.status = "completed";
+          job.completed_at = new Date().toISOString();
+          job.result = body.data;
+        } catch (err: any) {
+          job.status = "failed";
+          job.completed_at = new Date().toISOString();
+          job.error = String(err?.message || err);
+          console.error(`[async-job] ${jobId} failed:`, job.error);
+        }
+      })();
+
+      return res.status(202).json({
+        ok: true,
+        data: { job_id: jobId, status: "pending" },
+        meta: { version: "v2", async: true },
       });
     }
-    const body = { ok: true, data: out };
-    const status = 200;
-    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
+
+    // ── Sync mode (default): block until write completes ──
+    const { status, body } = await executeWriteAndRecord(parsed.data, idem);
     return res.status(status).json(body);
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
   }
-});
+};
 
-app.post("/v2/memories", async (req, res) => {
-  try {
-    const parsed = v2WriteSchema.safeParse(req.body);
-    if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+app.post("/v2/memory.write", (req, res) => handleV2Write(req, res, "POST:/v2/memory.write"));
+app.post("/v2/memories", (req, res) => handleV2Write(req, res, "POST:/v2/memories"));
 
-    const idem = idempotencyPrecheck(req, "POST:/v2/memories", parsed.data);
-    if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
-    if (idem.type === "replay") return res.status(idem.status).json(idem.body);
+// ── Async job status ──────────────────────────────────────────────────────────
+// Poll for the result of an async write submitted with `async: true`.
+// Returns the job's current status and, when completed, the full write result.
+app.get("/v2/jobs/:id", (req, res) => {
+  const job = asyncJobs.get(req.params.id);
+  if (!job) return v2Err(res, 404, "NOT_FOUND", `Job ${req.params.id} not found or expired`);
 
-    runtimeStats.requests.add += 1;
-    const t0 = Date.now();
-    const out = await v2Write(parsed.data);
-    const latencyMs = Date.now() - t0;
-    analyticsDb?.recordWriteResults({
-      results: out.result?.results || [],
-      inputChars: inputCharsFromBody(parsed.data),
-      latencyMs,
-      inferMode: parsed.data.infer_preferred !== false,
-      decisions: (out as any).decisions ?? undefined,
-    });
-    if (GRAPH_ENABLED) {
-      const graphRelations: any[] = (out as any).relations || [];
-      const addedEntities: any[] = (out as any).added_entities || [];
-      analyticsDb?.recordGraphWrite({
-        user_id: parsed.data.user_id,
-        run_id: parsed.data.run_id,
-        entitiesAdded: addedEntities.length,
-        relationsAdded: graphRelations.length,
-        latencyMs,
-      });
-    }
-    const body = { ok: true, data: out };
-    const status = 200;
-    if (idem.type === "fresh") idempotencyPersist(idem.key, idem.fingerprint, status, body);
-    return res.status(status).json(body);
-  } catch (err: any) {
-    return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
-  }
+  const data: Record<string, unknown> = {
+    job_id: job.id,
+    status: job.status,
+    created_at: job.created_at,
+    completed_at: job.completed_at,
+  };
+  if (job.status === "completed") data.result = job.result;
+  if (job.status === "failed") data.error = job.error;
+
+  const httpStatus = job.status === "completed" || job.status === "failed" ? 200 : 202;
+  return res.status(httpStatus).json({ ok: true, data, meta: { version: "v2" } });
 });
 
 app.post("/v2/memories/search", async (req, res) => {
@@ -1299,6 +1389,56 @@ app.put("/v2/config/update-prompt", (req, res) => {
   });
 });
 
+// ── Capture config (auto-capture message window) ──────────────────────────
+// Controls how many messages the memory plugin sends per auto-capture write.
+// Fewer messages = fewer entities extracted = less graph thrashing = faster writes.
+// The plugin reads this value via GET /v2/config/capture before each agent_end capture.
+
+app.get("/v2/config/capture", (_req, res) => {
+  const dbVal = analyticsDb?.getConfig("capture_message_limit") ?? null;
+  const source = dbVal !== null
+    ? "persisted"
+    : process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT
+      ? "env"
+      : "default";
+  return v2Ok(res, {
+    capture_message_limit: captureMessageLimit,
+    default: DEFAULT_CAPTURE_MESSAGE_LIMIT,
+    source,
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+const v2CaptureConfigSchema = z.object({
+  capture_message_limit: z.number().int().min(1).max(50),
+});
+
+app.put("/v2/config/capture", (req, res) => {
+  const parsed = v2CaptureConfigSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  }
+  captureMessageLimit = parsed.data.capture_message_limit;
+  analyticsDb?.setConfig("capture_message_limit", String(captureMessageLimit));
+  console.log(`[config] capture message limit updated: ${captureMessageLimit}`);
+  return v2Ok(res, {
+    capture_message_limit: captureMessageLimit,
+    source: "api",
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+app.delete("/v2/config/capture", (_req, res) => {
+  captureMessageLimit = Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
+  analyticsDb?.setConfig("capture_message_limit", null);
+  console.log(`[config] capture message limit reset to default: ${captureMessageLimit}`);
+  return v2Ok(res, {
+    capture_message_limit: captureMessageLimit,
+    source: process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT ? "env" : "default",
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
 // ── v2 observability & analytics ──────────────────────────────────────────
 
 app.get("/v2/health", async (_req, res) => {
@@ -1309,7 +1449,7 @@ app.get("/v2/health", async (_req, res) => {
     mem0: "oss",
     version: SERVICE_VERSION,
     build: { commit: BUILD_COMMIT, imageDigest: BUILD_IMAGE_DIGEST, time: BUILD_TIME },
-    llmModel: LLM_MODEL,
+    llmModel: effectiveLlmModel,
     embedModel: EMBED_MODEL,
     diagnostics: {
       authMode: AUTH_MODE,
@@ -1317,7 +1457,7 @@ app.get("/v2/health", async (_req, res) => {
       openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
       graphEnabled: GRAPH_ENABLED,
       neo4jUrl: NEO4J_URL,
-      graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
+      graphLlmModel: GRAPH_ENABLED ? effectiveGraphLlmModel : null,
       neo4jConnected: neo4j?.connected ?? null,
       neo4jNodeCount: neo4j?.nodeCount ?? null,
       neo4jRelationCount: neo4j?.relationCount ?? null,
@@ -1528,7 +1668,7 @@ class FoxAnalyticsDB {
         stmt.run(
           crypto.randomUUID(), ts, event, r?.id ?? null,
           opts.user_id ?? null, opts.run_id ?? null,
-          opts.inputChars, memText, LLM_MODEL,
+          opts.inputChars, memText, effectiveLlmModel,
           opts.latencyMs, opts.inferMode ? 1 : 0, callId,
           reason, extractedFactsJson, candidatesJson
         );
@@ -1685,7 +1825,7 @@ class FoxAnalyticsDB {
             minMs: latRow?.min ?? null,
             maxMs: latRow?.max ?? null,
           },
-          model: { llm: LLM_MODEL, embed: EMBED_MODEL },
+          model: { llm: effectiveLlmModel, embed: EMBED_MODEL },
         },
         byDay: Array.from(byDayMap.values()),
         recentActivity: recent.map((r: any) => ({
@@ -1837,6 +1977,14 @@ try {
     currentCustomGraphPrompt = persistedGraph;
     console.log("[config] restored custom graph prompt from DB");
   }
+  const persistedCaptureLimit = analyticsDb.getConfig("capture_message_limit");
+  if (persistedCaptureLimit !== null) {
+    const parsed = Number(persistedCaptureLimit);
+    if (!isNaN(parsed) && parsed >= 1) {
+      captureMessageLimit = parsed;
+      console.log(`[config] restored capture message limit from DB: ${captureMessageLimit}`);
+    }
+  }
   // Seed model catalog (INSERT OR IGNORE — never overwrites user edits)
   analyticsDb.seedCatalog([
     { id: "gpt-4.1-nano",  name: "GPT-4.1 Nano",  roles: ["llm", "graph_llm"], description: "Fastest and cheapest. Good for simple fact extraction; poor graph quality.",         input_mtok: 0.10,  cached_mtok: 0.025, output_mtok: 0.40  },
@@ -1890,7 +2038,7 @@ app.get("/v2/stats/memories", (req, res) => {
         byEvent: { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 },
         noneRatePct: 0,
         writeLatency: { avgMs: null, minMs: null, maxMs: null },
-        model: { llm: LLM_MODEL, embed: EMBED_MODEL },
+        model: { llm: effectiveLlmModel, embed: EMBED_MODEL },
       },
       byDay: [],
       recentActivity: [],
@@ -2749,16 +2897,28 @@ const V2_OPENAPI_SPEC = {
         responses: { "200": { description: "Memory analytics", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: { summary: { $ref: "#/components/schemas/StatsMemoriesSummary" }, byDay: { type: "array" }, recentActivity: { type: "array" }, searches: { $ref: "#/components/schemas/StatsMemoriesSearches" }, graph: { $ref: "#/components/schemas/StatsMemoriesGraph" } } } } }] } } } }, "400": { description: "Validation error" } },
       },
     },
+    "/jobs/{id}": {
+      get: {
+        summary: "Poll async write job status and result",
+        operationId: "v2GetJob",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" }, description: "Job ID returned by an async write (202 response)." }],
+        responses: {
+          "200": { description: "Job completed or failed", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, data: { type: "object", properties: { job_id: { type: "string" }, status: { type: "string", enum: ["completed", "failed"] }, created_at: { type: "string", format: "date-time" }, completed_at: { type: "string", format: "date-time", nullable: true }, result: { type: "object", description: "Full write result (same shape as sync 200). Present when status=completed." }, error: { type: "string", description: "Error message. Present when status=failed.", nullable: true } } } } } } } },
+          "202": { description: "Job still in progress (pending or running)", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, data: { type: "object", properties: { job_id: { type: "string" }, status: { type: "string", enum: ["pending", "running"] }, created_at: { type: "string", format: "date-time" }, completed_at: { type: "null" } } } } } } } },
+          "404": { description: "Job not found or expired" },
+        },
+      },
+    },
     "/memories": {
       post: {
-        summary: "Add/infer memories (with optional raw fallback and idempotency)",
+        summary: "Add/infer memories (with optional raw fallback, idempotency, and async mode)",
         operationId: "v2AddMemories",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: {
           messages: { type: "array", items: { $ref: "#/components/schemas/Message" } },
           text: { type: "string" },
           user_id: { type: "string" }, run_id: { type: "string" },
           metadata: { type: "object" },
-          infer_preferred: { type: "boolean" }, fallback_raw: { type: "boolean" },
+          infer_preferred: { type: "boolean" }, fallback_raw: { type: "boolean" }, async: { type: "boolean", description: "When true, return 202 immediately with a job_id. Poll GET /v2/jobs/:id for the result." },
           idempotency_key: { type: "string" },
         } } } } },
         responses: {
@@ -2771,8 +2931,10 @@ const V2_OPENAPI_SPEC = {
             relations: { type: "array", items: { $ref: "#/components/schemas/GraphRelation" }, description: "Graph triples added by this write. Only present when graph memory is enabled." },
             added_entities: { type: "array", items: { type: "object" }, description: "Graph entities upserted by this write. Only present when graph memory is enabled." },
           } } } }] } } } },
+          "202": { description: "Async write accepted (async: true). Poll GET /v2/jobs/:id for result.", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, data: { type: "object", properties: { job_id: { type: "string", format: "uuid" }, status: { type: "string", enum: ["pending"] } } }, meta: { type: "object", properties: { version: { type: "string" }, async: { type: "boolean" } } } } } } } },
           "400": { description: "Validation error" },
           "409": { description: "Idempotency conflict" },
+          "429": { description: "Too many concurrent async jobs" },
         },
       },
       get: {
@@ -2902,6 +3064,24 @@ const V2_OPENAPI_SPEC = {
         operationId: "v2SetGraphPrompt",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["prompt"], properties: { prompt: { type: "string", nullable: true } } } } } },
         responses: { "200": { description: "Updated prompt" }, "400": { description: "Validation error or graph not enabled" } },
+      },
+    },
+    "/config/capture": {
+      get: {
+        summary: "Get auto-capture message limit — controls how many messages the plugin sends per agent_end capture",
+        operationId: "v2GetCaptureConfig",
+        responses: { "200": { description: "{ capture_message_limit: number, default: number, source: string, persisted: boolean }" } },
+      },
+      put: {
+        summary: "Set auto-capture message limit — persisted across restarts. Lower values reduce graph thrashing and write latency.",
+        operationId: "v2SetCaptureConfig",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["capture_message_limit"], properties: { capture_message_limit: { type: "integer", minimum: 1, maximum: 50, description: "Number of messages the plugin should send per auto-capture write." } } } } } },
+        responses: { "200": { description: "Updated capture config" }, "400": { description: "Validation error" } },
+      },
+      delete: {
+        summary: "Clear capture config override — reverts to env var or default (10)",
+        operationId: "v2DeleteCaptureConfig",
+        responses: { "200": { description: "Reverted capture config" } },
       },
     },
     "/graph": {
@@ -3068,14 +3248,14 @@ app.listen(PORT, () => {
         authMode: AUTH_MODE,
         openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
         openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
-        llmModel: LLM_MODEL,
+        llmModel: effectiveLlmModel,
         embedModel: EMBED_MODEL,
         qdrantHost: process.env.QDRANT_HOST || null,
         qdrantPort: process.env.QDRANT_PORT ? Number(process.env.QDRANT_PORT) : null,
         qdrantCollection: process.env.QDRANT_COLLECTION || "foxmemory",
         graphEnabled: GRAPH_ENABLED,
         neo4jUrl: NEO4J_URL,
-        graphLlmModel: GRAPH_ENABLED ? GRAPH_LLM_MODEL : null,
+        graphLlmModel: GRAPH_ENABLED ? effectiveGraphLlmModel : null,
       },
       null,
       0

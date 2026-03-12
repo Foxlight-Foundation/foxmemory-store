@@ -106,6 +106,7 @@ Request body:
   "metadata": { "source": "chat" },
   "infer_preferred": true,
   "fallback_raw": true,
+  "async": false,
   "idempotency_key": "optional-stable-key"
 }
 ```
@@ -117,6 +118,7 @@ Validation:
 Write behavior:
 - `infer_preferred=true` (default): try extractive/infer path first.
 - If infer yields no results and `fallback_raw=true` (default), write deterministic raw memory (`infer:false`).
+- `async=true`: return `202 Accepted` immediately with a `job_id`. The write processes in the background. Poll `GET /v2/jobs/:id` for the result. This prevents the caller from blocking for minutes during graph extraction.
 
 Success response:
 
@@ -170,6 +172,75 @@ Idempotency:
 - Same key + same payload: replay first response.
 - Same key + different payload: `409 IDEMPOTENCY_CONFLICT`.
 - TTL configurable by `IDEMPOTENCY_TTL_MS` (default 24h, min 60s).
+
+Async write response (`async: true`):
+
+```json
+{
+  "ok": true,
+  "data": { "job_id": "uuid", "status": "pending" },
+  "meta": { "version": "v2", "async": true }
+}
+```
+
+- Returns `202 Accepted`.
+- Max concurrent async jobs controlled by `ASYNC_JOB_MAX` (default 100). Returns `429 TOO_MANY_JOBS` when exceeded.
+- Completed jobs are retained in memory for `ASYNC_JOB_TTL_MS` (default 1 hour), then cleaned up.
+
+## 2.1a Job Status
+
+### `GET /v2/jobs/:id`
+
+Poll the status and result of an async write job.
+
+Success (pending/running — HTTP 202):
+
+```json
+{
+  "ok": true,
+  "data": {
+    "job_id": "uuid",
+    "status": "pending | running",
+    "created_at": "2026-03-11T...",
+    "completed_at": null
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+Success (completed — HTTP 200):
+
+```json
+{
+  "ok": true,
+  "data": {
+    "job_id": "uuid",
+    "status": "completed",
+    "created_at": "2026-03-11T...",
+    "completed_at": "2026-03-11T...",
+    "result": { "mode": "inferred", "attempts": 3, "infer": { "resultCount": 1 }, ... }
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+Success (failed — HTTP 200):
+
+```json
+{
+  "ok": true,
+  "data": {
+    "job_id": "uuid",
+    "status": "failed",
+    "created_at": "2026-03-11T...",
+    "completed_at": "2026-03-11T...",
+    "error": "Error message"
+  },
+  "meta": { "version": "v2" }
+}
+```
+
+- `404 NOT_FOUND` if the job ID doesn't exist or has expired.
 
 ## 2.2 Search
 
@@ -660,6 +731,55 @@ Request body:
 - Persisted to SQLite and survives restarts.
 - Returns `400 BAD_REQUEST` when graph memory is not enabled.
 
+## 2.11a Capture Config
+
+Runtime-configurable auto-capture settings. Controls how many messages the memory plugin sends per auto-capture write (`agent_end` hook). Fewer messages = fewer entities extracted = less graph thrashing = faster writes. Persisted to SQLite — survives restarts.
+
+### `GET /v2/config/capture`
+
+```json
+{
+  "ok": true,
+  "data": {
+    "capture_message_limit": 10,
+    "default": 10,
+    "source": "default",
+    "persisted": true
+  }
+}
+```
+
+- `capture_message_limit`: current effective value.
+- `default`: the built-in default (10).
+- `source`: `"default"` | `"env"` | `"persisted"` | `"api"`
+
+### `PUT /v2/config/capture`
+
+Set the capture message limit.
+
+Request body:
+```json
+{ "capture_message_limit": 5 }
+```
+
+- `capture_message_limit`: integer, min 1, max 50.
+- Persisted to SQLite and survives restarts.
+
+### `DELETE /v2/config/capture`
+
+Clear the persisted override — reverts to env var or default (10).
+
+```json
+{
+  "ok": true,
+  "data": {
+    "capture_message_limit": 10,
+    "source": "default",
+    "persisted": true
+  }
+}
+```
+
 ---
 
 ## 2.12 Graph API _(graph-enabled only)_
@@ -958,6 +1078,7 @@ Common v2 titles:
 - `VALIDATION_ERROR` (400)
 - `NOT_FOUND` (404)
 - `IDEMPOTENCY_CONFLICT` (409)
+- `TOO_MANY_JOBS` (429)
 - `INTERNAL_ERROR` (500)
 
 ---
@@ -980,6 +1101,11 @@ Common v2 titles:
   - `MEM0_GRAPH_SEARCH_THRESHOLD` — cosine similarity threshold for graph candidate retrieval (default: `0.7`).
   - `MEM0_GRAPH_NODE_DEDUP_THRESHOLD` — cosine similarity threshold for node deduplication during entity upsert (default: `0.9`).
   - `MEM0_GRAPH_BM25_TOPK` — max results returned after BM25 reranking in graph search (default: `5`).
+- Async writes:
+  - `ASYNC_JOB_TTL_MS` — how long completed/failed async jobs stay in memory (default: `3600000` = 1 hour).
+  - `ASYNC_JOB_MAX` — max concurrent in-flight async jobs before `429` (default: `100`).
+- Capture config:
+  - `FOXMEMORY_CAPTURE_MESSAGE_LIMIT` — initial default for auto-capture message window (default: `10`). Overridable at runtime via `PUT /v2/config/capture`.
 
 When graph memory is enabled:
 - Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment). Write responses include a top-level `relations` array (graph triples added by this call).
