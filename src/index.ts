@@ -163,6 +163,14 @@ const DEFAULT_CAPTURE_MESSAGE_LIMIT = 5;
 let captureMessageLimit: number =
   Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
 
+// Runtime-configurable role names for memory extraction. Maps message roles
+// ("user", "assistant") to real names so the extraction LLM can attribute
+// memories to the correct person. Without this, messages are flattened without
+// role labels and the LLM defaults to "User prefers..." / "the assistant said...".
+// Set via PUT /v2/config/roles. Persisted to SQLite. Env vars set the initial defaults.
+let roleUserName: string = process.env.FOXMEMORY_ROLE_USER_NAME || "user";
+let roleAssistantName: string = process.env.FOXMEMORY_ROLE_ASSISTANT_NAME || "assistant";
+
 function ensureJsonWordInMessages(messages: any[]): any[] {
   const hasJsonWord = messages.some((m: any) =>
     typeof m?.content === "string" && /\bjson\b/i.test(m.content)
@@ -203,6 +211,9 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
     historyDbPath: process.env.MEM0_HISTORY_DB_PATH || "/tmp/history.db",
     ...(customPrompt ? { customPrompt } : {}),
     ...(customUpdatePrompt ? { customUpdatePrompt } : {}),
+    // Role names for memory extraction — maps "user"/"assistant" to real names
+    // so the LLM attributes memories to the correct person.
+    roleNames: { user: roleUserName, assistant: roleAssistantName },
     llm: {
       provider: "openai",
       config: {
@@ -1447,6 +1458,75 @@ app.delete("/v2/config/capture", (_req, res) => {
   });
 });
 
+// ── Role names config (memory extraction identity) ────────────────────────
+// Maps message roles ("user", "assistant") to real names so the extraction
+// LLM attributes memories to the correct person instead of "User prefers...".
+// The plugin and dashboard read/set these via this API.
+
+app.get("/v2/config/roles", (_req, res) => {
+  const dbUser = analyticsDb?.getConfig("role_user_name") ?? null;
+  const dbAssistant = analyticsDb?.getConfig("role_assistant_name") ?? null;
+  const source = (dbUser !== null || dbAssistant !== null)
+    ? "persisted"
+    : (process.env.FOXMEMORY_ROLE_USER_NAME || process.env.FOXMEMORY_ROLE_ASSISTANT_NAME)
+      ? "env"
+      : "default";
+  return v2Ok(res, {
+    user: roleUserName,
+    assistant: roleAssistantName,
+    source,
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+const v2RolesConfigSchema = z.object({
+  user: z.string().trim().min(1).max(100).optional(),
+  assistant: z.string().trim().min(1).max(100).optional(),
+});
+
+app.put("/v2/config/roles", (req, res) => {
+  const parsed = v2RolesConfigSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
+  }
+  if (!parsed.data.user && !parsed.data.assistant) {
+    return v2Err(res, 400, "VALIDATION_ERROR", "At least one of 'user' or 'assistant' must be provided");
+  }
+  if (parsed.data.user) {
+    roleUserName = parsed.data.user;
+    analyticsDb?.setConfig("role_user_name", roleUserName);
+  }
+  if (parsed.data.assistant) {
+    roleAssistantName = parsed.data.assistant;
+    analyticsDb?.setConfig("role_assistant_name", roleAssistantName);
+  }
+  // Recreate Memory instance so roleNames take effect immediately.
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  console.log(`[config] role names updated: user=${roleUserName}, assistant=${roleAssistantName}`);
+  return v2Ok(res, {
+    user: roleUserName,
+    assistant: roleAssistantName,
+    source: "api",
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
+app.delete("/v2/config/roles", (_req, res) => {
+  roleUserName = process.env.FOXMEMORY_ROLE_USER_NAME || "user";
+  roleAssistantName = process.env.FOXMEMORY_ROLE_ASSISTANT_NAME || "assistant";
+  analyticsDb?.setConfig("role_user_name", null);
+  analyticsDb?.setConfig("role_assistant_name", null);
+  // Recreate Memory instance with reset role names.
+  memory = createMemory(currentCustomPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
+  console.log(`[config] role names reset to defaults: user=${roleUserName}, assistant=${roleAssistantName}`);
+  return v2Ok(res, {
+    user: roleUserName,
+    assistant: roleAssistantName,
+    source: (process.env.FOXMEMORY_ROLE_USER_NAME || process.env.FOXMEMORY_ROLE_ASSISTANT_NAME) ? "env" : "default",
+    persisted: analyticsDb?.ready ?? false,
+  });
+});
+
 // ── v2 observability & analytics ──────────────────────────────────────────
 
 app.get("/v2/health", async (_req, res) => {
@@ -1992,6 +2072,16 @@ try {
       captureMessageLimit = parsed;
       console.log(`[config] restored capture message limit from DB: ${captureMessageLimit}`);
     }
+  }
+  const persistedRoleUser = analyticsDb.getConfig("role_user_name");
+  if (persistedRoleUser !== null) {
+    roleUserName = persistedRoleUser;
+    console.log(`[config] restored role user name from DB: ${roleUserName}`);
+  }
+  const persistedRoleAssistant = analyticsDb.getConfig("role_assistant_name");
+  if (persistedRoleAssistant !== null) {
+    roleAssistantName = persistedRoleAssistant;
+    console.log(`[config] restored role assistant name from DB: ${roleAssistantName}`);
   }
   // Seed model catalog (INSERT OR IGNORE — never overwrites user edits)
   analyticsDb.seedCatalog([
@@ -3092,6 +3182,24 @@ const V2_OPENAPI_SPEC = {
         responses: { "200": { description: "Reverted capture config" } },
       },
     },
+    "/config/roles": {
+      get: {
+        summary: "Get role name mapping — controls how message roles are labeled for the extraction LLM",
+        operationId: "v2GetRolesConfig",
+        responses: { "200": { description: "{ user: string, assistant: string, source: string, persisted: boolean }" } },
+      },
+      put: {
+        summary: "Set role names — persisted across restarts. Maps 'user'/'assistant' to real names for extraction.",
+        operationId: "v2SetRolesConfig",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { user: { type: "string", minLength: 1, maxLength: 100, description: "Name for the 'user' message role." }, assistant: { type: "string", minLength: 1, maxLength: 100, description: "Name for the 'assistant' message role." } } } } } },
+        responses: { "200": { description: "Updated role names" }, "400": { description: "Validation error — at least one of user or assistant must be provided" } },
+      },
+      delete: {
+        summary: "Clear role name overrides — reverts to env vars or defaults ('user', 'assistant')",
+        operationId: "v2DeleteRolesConfig",
+        responses: { "200": { description: "Reverted role names" } },
+      },
+    },
     "/graph": {
       get: {
         summary: "Full node+edge graph for a user/run — primary endpoint for graph rendering. Graph-enabled only.",
@@ -3264,6 +3372,7 @@ app.listen(PORT, () => {
         graphEnabled: GRAPH_ENABLED,
         neo4jUrl: NEO4J_URL,
         graphLlmModel: GRAPH_ENABLED ? effectiveGraphLlmModel : null,
+        roleNames: { user: roleUserName, assistant: roleAssistantName },
       },
       null,
       0

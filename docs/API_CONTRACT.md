@@ -780,6 +780,60 @@ Clear the persisted override — reverts to env var or default (5).
 }
 ```
 
+## 2.11b Role Names Config
+
+Runtime-configurable role name mapping. Controls how message roles (`user`, `assistant`) are labeled in the text sent to the extraction LLM. By default, roles are labeled as `"user"` and `"assistant"`, which causes the LLM to produce generic memories like "User prefers...". Setting real names (e.g., `"Thomas"`, `"Kite"`) enables the LLM to attribute memories to the correct person.
+
+Persisted to SQLite — survives restarts. Recreates the Memory instance on change.
+
+### `GET /v2/config/roles`
+
+```json
+{
+  "ok": true,
+  "data": {
+    "user": "Thomas",
+    "assistant": "Kite",
+    "source": "persisted",
+    "persisted": true
+  }
+}
+```
+
+- `user`: name mapped to the "user" message role.
+- `assistant`: name mapped to the "assistant" message role.
+- `source`: `"default"` | `"env"` | `"persisted"` | `"api"`
+
+### `PUT /v2/config/roles`
+
+Set one or both role names.
+
+Request body (at least one field required):
+```json
+{ "user": "Thomas", "assistant": "Kite" }
+```
+
+- `user`: string, 1–100 chars, optional.
+- `assistant`: string, 1–100 chars, optional.
+- Persisted to SQLite and survives restarts.
+- Returns `400 VALIDATION_ERROR` if neither field is provided.
+
+### `DELETE /v2/config/roles`
+
+Clear persisted overrides — reverts to env vars (`FOXMEMORY_ROLE_USER_NAME`, `FOXMEMORY_ROLE_ASSISTANT_NAME`) or defaults (`"user"`, `"assistant"`).
+
+```json
+{
+  "ok": true,
+  "data": {
+    "user": "user",
+    "assistant": "assistant",
+    "source": "default",
+    "persisted": true
+  }
+}
+```
+
 ---
 
 ## 2.12 Graph API _(graph-enabled only)_
@@ -1106,6 +1160,9 @@ Common v2 titles:
   - `ASYNC_JOB_MAX` — max concurrent in-flight async jobs before `429` (default: `100`).
 - Capture config:
   - `FOXMEMORY_CAPTURE_MESSAGE_LIMIT` — initial default for auto-capture message window (default: `5`). Overridable at runtime via `PUT /v2/config/capture`.
+- Role names:
+  - `FOXMEMORY_ROLE_USER_NAME` — name for the "user" role in extraction context (default: `"user"`). Overridable at runtime via `PUT /v2/config/roles`.
+  - `FOXMEMORY_ROLE_ASSISTANT_NAME` — name for the "assistant" role in extraction context (default: `"assistant"`). Overridable at runtime via `PUT /v2/config/roles`.
 
 When graph memory is enabled:
 - Every `POST /v2/memories` write runs 2 additional LLM calls (entity extraction + relation establishment). Write responses include a top-level `relations` array (graph triples added by this call).
