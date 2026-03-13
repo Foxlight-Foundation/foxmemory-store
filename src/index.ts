@@ -855,7 +855,6 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
   const runId = body.run_id;
   const metadata = body.metadata;
   const inferPreferred = body.infer_preferred !== false;
-  const fallbackRaw = body.fallback_raw !== false;
   const messages = body.messages?.length
     ? body.messages
     : [{ role: "user", content: String(body.text || "") }];
@@ -883,33 +882,30 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
       runId,
       metadata
     });
-    if (Array.isArray(inferResult?.results) && inferResult.results.length > 0) {
+    const hasResults = Array.isArray(inferResult?.results) && inferResult.results.length > 0;
+    if (hasResults) {
       trackAddResult("infer", inferResult);
       captureGraphLinks(inferResult, userId);
-      return {
-        mode: "inferred",
-        attempts: ADD_RETRIES,
-        infer: { resultCount: inferResult.results.length },
-        result: inferResult,
-        decisions: inferResult.decisions ?? null,
-        ...(GRAPH_ENABLED ? { relations: inferResult.relations || [], added_entities: inferResult.added_entities || [] } : {}),
-      };
+    } else {
+      runtimeStats.writesByMode.infer += 1;
+      runtimeStats.memoryEvents.NONE += 1;
     }
-  }
-
-  if (!fallbackRaw) {
-    runtimeStats.writesByMode.infer += 1;
-    runtimeStats.memoryEvents.NONE += 1;
+    // Always return after inference — empty results means NONE (nothing new),
+    // not failure. addWithRetries throws on actual LLM errors, so reaching
+    // here means inference ran correctly. Never fall through to fallback_raw;
+    // storing raw conversation text as a "memory" creates junk.
     return {
-      mode: "none",
-      attempts: inferPreferred ? ADD_RETRIES : 0,
-      infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
+      mode: hasResults ? "inferred" : "none",
+      attempts: ADD_RETRIES,
+      infer: { resultCount: hasResults ? inferResult.results.length : 0 },
       result: inferResult,
       decisions: inferResult?.decisions ?? null,
-      ...(GRAPH_ENABLED ? { relations: inferResult?.relations || [], added_entities: inferResult?.added_entities || [] } : {}),
+      ...(GRAPH_ENABLED && hasResults ? { relations: inferResult.relations || [], added_entities: inferResult.added_entities || [] } : {}),
     };
   }
 
+  // Non-inferred write (infer_preferred=false): store raw text directly.
+  // This path is used by memory.raw_write for deterministic ingest.
   const rawText = body.text?.trim()
     ? body.text
     : messages
@@ -927,10 +923,9 @@ async function v2Write(body: z.infer<typeof v2WriteSchema>) {
   trackAddResult("raw", rawResult);
   captureGraphLinks(rawResult, userId);
   return {
-    mode: "fallback_raw",
-    attempts: inferPreferred ? ADD_RETRIES : 0,
-    infer: { resultCount: Array.isArray(inferResult?.results) ? inferResult.results.length : 0 },
-    fallback: { resultCount: Array.isArray(rawResult?.results) ? rawResult.results.length : 0 },
+    mode: "raw",
+    attempts: 0,
+    infer: { resultCount: 0 },
     result: rawResult,
     decisions: rawResult?.decisions ?? null,
     ...(GRAPH_ENABLED ? { relations: rawResult?.relations || [], added_entities: rawResult?.added_entities || [] } : {}),
@@ -3022,12 +3017,12 @@ const V2_OPENAPI_SPEC = {
           text: { type: "string" },
           user_id: { type: "string" }, run_id: { type: "string" },
           metadata: { type: "object" },
-          infer_preferred: { type: "boolean" }, fallback_raw: { type: "boolean" }, async: { type: "boolean", description: "When true, return 202 immediately with a job_id. Poll GET /v2/jobs/:id for the result." },
+          infer_preferred: { type: "boolean" }, fallback_raw: { type: "boolean", description: "Deprecated — accepted but ignored. Raw fallback has been removed." }, async: { type: "boolean", description: "When true, return 202 immediately with a job_id. Poll GET /v2/jobs/:id for the result." },
           idempotency_key: { type: "string" },
         } } } } },
         responses: {
           "200": { description: "Write result", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/OkEnvelope" }, { type: "object", properties: { data: { type: "object", properties: {
-            mode: { type: "string", enum: ["inferred", "fallback_raw", "none"] },
+            mode: { type: "string", enum: ["inferred", "none", "raw", "skipped"] },
             attempts: { type: "integer" },
             infer: { type: "object", properties: { resultCount: { type: "integer" } } },
             result: { type: "object" },
