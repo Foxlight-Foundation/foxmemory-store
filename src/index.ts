@@ -519,6 +519,10 @@ app.get("/health", (_req, res) => {
     embedModel: EMBED_MODEL,
     diagnostics: {
       authMode: AUTH_MODE,
+      // Legacy fields (kept for backward compat with existing monitors)
+      openaiApiKeyConfigured: HAS_LLM_API_KEY,
+      openaiBaseUrl: sanitizeBaseUrl(LLM_BASE_URL),
+      // Per-purpose fields
       apiKeyConfigured: { llm: HAS_LLM_API_KEY, embed: HAS_EMBED_API_KEY, graphLlm: HAS_GRAPH_LLM_API_KEY },
       baseUrl: { llm: sanitizeBaseUrl(LLM_BASE_URL), embed: sanitizeBaseUrl(EMBED_BASE_URL), graphLlm: sanitizeBaseUrl(GRAPH_LLM_BASE_URL) },
       graphEnabled: GRAPH_ENABLED,
@@ -1558,6 +1562,10 @@ app.get("/v2/health", async (_req, res) => {
     embedModel: EMBED_MODEL,
     diagnostics: {
       authMode: AUTH_MODE,
+      // Legacy fields (kept for backward compat with existing monitors)
+      openaiApiKeyConfigured: HAS_LLM_API_KEY,
+      openaiBaseUrl: sanitizeBaseUrl(LLM_BASE_URL),
+      // Per-purpose fields
       apiKeyConfigured: { llm: HAS_LLM_API_KEY, embed: HAS_EMBED_API_KEY, graphLlm: HAS_GRAPH_LLM_API_KEY },
       baseUrl: { llm: sanitizeBaseUrl(LLM_BASE_URL), embed: sanitizeBaseUrl(EMBED_BASE_URL), graphLlm: sanitizeBaseUrl(GRAPH_LLM_BASE_URL) },
       graphEnabled: GRAPH_ENABLED,
@@ -2919,6 +2927,8 @@ const V2_OPENAPI_SPEC = {
         type: "object",
         properties: {
           authMode: { type: "string" },
+          openaiApiKeyConfigured: { type: "boolean", description: "Legacy alias — reflects main LLM API key status." },
+          openaiBaseUrl: { type: "string", nullable: true, description: "Legacy alias — reflects main LLM base URL." },
           apiKeyConfigured: { type: "object", properties: { llm: { type: "boolean" }, embed: { type: "boolean" }, graphLlm: { type: "boolean" } } },
           baseUrl: { type: "object", properties: { llm: { type: "string", nullable: true }, embed: { type: "string", nullable: true }, graphLlm: { type: "string", nullable: true } } },
           graphEnabled: { type: "boolean", description: "True when NEO4J_URL + NEO4J_PASSWORD are set." },
