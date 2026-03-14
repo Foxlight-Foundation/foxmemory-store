@@ -11,10 +11,16 @@ import {
   v2GraphStatsQuerySchema,
 } from "../schemas/index.js";
 
-export const createGraphRouter = () => {
-  const router = Router();
+/**
+ * @param v2Prefix - The URL prefix for v2 routes. Default "/v2". For agent-scoped routes, pass "/v2/agents/:agentId".
+ */
+export const createGraphRouter = (v2Prefix = "/v2") => {
+  const router = Router({ mergeParams: true });
 
-  router.get("/v2/graph/relations", async (req, res) => {
+  /** Helper: resolve the Memory instance — agent-scoped if available, otherwise singleton */
+  const mem = (req: Express.Request) => (req as any).agentMemory ?? getMemory();
+
+  router.get(`${v2Prefix}/graph/relations`, async (req, res) => {
     if (!GRAPH_ENABLED) {
       return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
     }
@@ -22,7 +28,7 @@ export const createGraphRouter = () => {
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
     try {
-      const memory = getMemory();
+      const memory = mem(req);
       const graphStore = (memory as any).graphMemory;
       if (!graphStore) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Graph store not initialized");
 
@@ -38,7 +44,7 @@ export const createGraphRouter = () => {
     }
   });
 
-  router.get("/v2/graph", async (req, res) => {
+  router.get(`${v2Prefix}/graph`, async (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
     const parsed = v2GraphQuerySchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
@@ -69,7 +75,7 @@ export const createGraphRouter = () => {
     }
   });
 
-  router.get("/v2/graph/nodes", async (req, res) => {
+  router.get(`${v2Prefix}/graph/nodes`, async (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
     const parsed = v2GraphNodesListSchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
@@ -92,7 +98,7 @@ export const createGraphRouter = () => {
     }
   });
 
-  router.get("/v2/graph/nodes/:id", async (req, res) => {
+  router.get(`${v2Prefix}/graph/nodes/:id`, async (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
     try {
       return await graphSession(async (session) => {
@@ -132,7 +138,7 @@ export const createGraphRouter = () => {
     }
   });
 
-  router.post("/v2/graph/search", async (req, res) => {
+  router.post(`${v2Prefix}/graph/search`, async (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
     const parsed = v2GraphSearchBodySchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid body", parsed.error.flatten());
@@ -191,7 +197,7 @@ export const createGraphRouter = () => {
     }
   });
 
-  router.get("/v2/graph/stats", async (req, res) => {
+  router.get(`${v2Prefix}/graph/stats`, async (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled (set NEO4J_URL and NEO4J_PASSWORD)");
     const parsed = v2GraphStatsQuerySchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
@@ -249,7 +255,7 @@ export const createGraphRouter = () => {
     }
   });
 
-  router.post("/v2/graph/admin/wipe", async (req, res) => {
+  router.post(`${v2Prefix}/graph/admin/wipe`, async (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
     if (req.headers["x-admin-action"] !== "wipe-graph") {
       return v2Err(res, 400, "BAD_REQUEST", "Missing required header: X-Admin-Action: wipe-graph");

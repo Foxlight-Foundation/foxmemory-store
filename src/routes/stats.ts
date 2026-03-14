@@ -4,10 +4,13 @@ import { analyticsDb } from "../analytics/db.js";
 import { v2Ok, v2Err } from "../utils/response.js";
 import { v2StatsMemoriesQuerySchema, v2WriteEventsQuerySchema } from "../schemas/index.js";
 
-export const createStatsRouter = () => {
-  const router = Router();
+/**
+ * @param v2Prefix - The URL prefix for v2 routes. Default "/v2". For agent-scoped routes, pass "/v2/agents/:agentId".
+ */
+export const createStatsRouter = (v2Prefix = "/v2") => {
+  const router = Router({ mergeParams: true });
 
-  router.get("/v2/stats", (_req, res) => {
+  router.get(`${v2Prefix}/stats`, (_req, res) => {
     const started = Date.parse(runtimeStats.startedAt);
     const uptimeSec = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : null;
 
@@ -49,7 +52,7 @@ export const createStatsRouter = () => {
     }, { version: "v2" });
   });
 
-  router.get("/v2/stats/memories", (req, res) => {
+  router.get(`${v2Prefix}/stats/memories`, (req, res) => {
     const parsed = v2StatsMemoriesQuerySchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
 
@@ -83,7 +86,7 @@ export const createStatsRouter = () => {
     return v2Ok(res, { ...stats, window }, { version: "v2" });
   });
 
-  router.get("/v2/write-events", (req, res) => {
+  router.get(`${v2Prefix}/write-events`, (req, res) => {
     const parsed = v2WriteEventsQuerySchema.safeParse(req.query);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
     if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");

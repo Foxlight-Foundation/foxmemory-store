@@ -26,153 +26,163 @@ const resolveScopeIds = (input: { scope?: "session" | "long-term" | "all"; user_
   return { user_id: input.user_id, run_id: input.run_id };
 };
 
-export const createMemoriesRouter = () => {
-  const router = Router();
+/**
+ * @param v2Prefix - The URL prefix for v2 routes. Default "/v2". For agent-scoped routes, pass "/v2/agents/:agentId".
+ */
+export const createMemoriesRouter = (v2Prefix = "/v2") => {
+  const router = Router({ mergeParams: true });
 
-  router.post("/v1/memories", async (req, res) => {
-    try {
-      const parsed = addSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  /** Helper: resolve the Memory instance — agent-scoped if available, otherwise singleton */
+  const mem = (req: Express.Request) => (req as any).agentMemory ?? getMemory();
 
-      runtimeStats.requests.search += 1;
-      const body = parsed.data;
-      runtimeStats.requests.add += 1;
-      const result = await addWithRetries(body.messages, {
-        userId: body.user_id,
-        runId: body.run_id,
-        metadata: body.metadata
-      });
+  // Legacy v1 routes (only on default prefix)
+  if (v2Prefix === "/v2") {
+    router.post("/v1/memories", async (req, res) => {
+      try {
+        const parsed = addSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-      trackAddResult("infer", result);
-      captureGraphLinks(result, body.user_id);
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+        runtimeStats.requests.search += 1;
+        const body = parsed.data;
+        runtimeStats.requests.add += 1;
+        const result = await addWithRetries(body.messages, {
+          userId: body.user_id,
+          runId: body.run_id,
+          metadata: body.metadata
+        }, mem(req));
 
-  router.post("/v1/memories/search", async (req, res) => {
-    try {
-      const parsed = searchSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+        trackAddResult("infer", result);
+        captureGraphLinks(result, body.user_id);
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
 
-      const body = parsed.data;
-      runtimeStats.requests.search += 1;
-      const memory = getMemory();
-      const result = await memory.search(body.query, {
-        userId: body.user_id,
-        runId: body.run_id,
-        limit: body.top_k
-      } as any);
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+    router.post("/v1/memories/search", async (req, res) => {
+      try {
+        const parsed = searchSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  router.get("/v1/memories/:id", async (req, res) => {
-    try {
-      runtimeStats.requests.get += 1;
-      const memory = getMemory();
-      const result = await memory.get(req.params.id);
-      res.json(result);
-    } catch (err) {
-      res.status(404).json({ error: String(err) });
-    }
-  });
+        const body = parsed.data;
+        runtimeStats.requests.search += 1;
+        const memory = mem(req);
+        const result = await memory.search(body.query, {
+          userId: body.user_id,
+          runId: body.run_id,
+          limit: body.top_k
+        } as any);
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
 
-  router.get("/v1/memories", async (req, res) => {
-    try {
-      const parsed = requireScopeSchema.safeParse({
-        user_id: req.query.user_id,
-        run_id: req.query.run_id
-      });
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    router.get("/v1/memories/:id", async (req, res) => {
+      try {
+        runtimeStats.requests.get += 1;
+        const memory = mem(req);
+        const result = await memory.get(req.params.id);
+        res.json(result);
+      } catch (err) {
+        res.status(404).json({ error: String(err) });
+      }
+    });
 
-      const userId = parsed.data.user_id as string | undefined;
-      const runId = parsed.data.run_id as string | undefined;
-      runtimeStats.requests.list += 1;
-      const memory = getMemory();
-      const result = await memory.getAll({ userId, runId } as any);
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+    router.get("/v1/memories", async (req, res) => {
+      try {
+        const parsed = requireScopeSchema.safeParse({
+          user_id: req.query.user_id,
+          run_id: req.query.run_id
+        });
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  router.delete("/v1/memories/:id", async (req, res) => {
-    try {
-      runtimeStats.requests.delete += 1;
-      const memory = getMemory();
-      await memory.delete(req.params.id);
-      res.json({ ok: true, id: req.params.id });
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+        const userId = parsed.data.user_id as string | undefined;
+        const runId = parsed.data.run_id as string | undefined;
+        runtimeStats.requests.list += 1;
+        const memory = mem(req);
+        const result = await memory.getAll({ userId, runId } as any);
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
 
-  router.post("/memory.write", async (req, res) => {
-    try {
-      const parsed = writeAliasSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    router.delete("/v1/memories/:id", async (req, res) => {
+      try {
+        runtimeStats.requests.delete += 1;
+        const memory = mem(req);
+        await memory.delete(req.params.id);
+        res.json({ ok: true, id: req.params.id });
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
 
-      const { text, user_id, run_id } = parsed.data;
-      runtimeStats.requests.add += 1;
-      const result = await addWithRetries([{ role: "user", content: text }], {
-        userId: user_id,
-        runId: run_id
-      });
-      trackAddResult("infer", result);
-      res.json({ ok: true, result });
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+    router.post("/memory.write", async (req, res) => {
+      try {
+        const parsed = writeAliasSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  router.post("/memory.search", async (req, res) => {
-    try {
-      const parsed = searchAliasSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+        const { text, user_id, run_id } = parsed.data;
+        runtimeStats.requests.add += 1;
+        const result = await addWithRetries([{ role: "user", content: text }], {
+          userId: user_id,
+          runId: run_id
+        }, mem(req));
+        trackAddResult("infer", result);
+        res.json({ ok: true, result });
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
 
-      const { query, user_id, run_id, limit } = parsed.data;
-      runtimeStats.requests.search += 1;
-      const memory = getMemory();
-      const result = await memory.search(query, {
-        userId: user_id,
-        runId: run_id,
-        limit: limit ?? 5
-      } as any);
-      res.json({ ok: true, ...result });
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+    router.post("/memory.search", async (req, res) => {
+      try {
+        const parsed = searchAliasSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  router.post("/memory.raw_write", async (req, res) => {
-    try {
-      const parsed = rawWriteSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+        const { query, user_id, run_id, limit } = parsed.data;
+        runtimeStats.requests.search += 1;
+        const memory = mem(req);
+        const result = await memory.search(query, {
+          userId: user_id,
+          runId: run_id,
+          limit: limit ?? 5
+        } as any);
+        res.json({ ok: true, ...result });
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
 
-      const { text, user_id, run_id, metadata } = parsed.data;
-      runtimeStats.requests.add += 1;
-      const memory = getMemory();
-      const result = await memory.add([{ role: "user", content: text }], {
-        userId: user_id,
-        runId: run_id,
-        metadata,
-        infer: false
-      } as any);
-      trackAddResult("raw", result);
-      res.json({ ok: true, deterministic: true, result });
-    } catch (err: any) {
-      res.status(500).json({ error: String(err?.message || err) });
-    }
-  });
+    router.post("/memory.raw_write", async (req, res) => {
+      try {
+        const parsed = rawWriteSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  router.post("/v2/memory.write", (req, res) => handleV2Write(req, res, "POST:/v2/memory.write"));
-  router.post("/v2/memories", (req, res) => handleV2Write(req, res, "POST:/v2/memories"));
+        const { text, user_id, run_id, metadata } = parsed.data;
+        runtimeStats.requests.add += 1;
+        const memory = mem(req);
+        const result = await memory.add([{ role: "user", content: text }], {
+          userId: user_id,
+          runId: run_id,
+          metadata,
+          infer: false
+        } as any);
+        trackAddResult("raw", result);
+        res.json({ ok: true, deterministic: true, result });
+      } catch (err: any) {
+        res.status(500).json({ error: String(err?.message || err) });
+      }
+    });
+  }
 
-  router.post("/v2/memories/search", async (req, res) => {
+  // v2 routes (with configurable prefix)
+  router.post(`${v2Prefix}/memory.write`, (req, res) => handleV2Write(req, res, `POST:${v2Prefix}/memory.write`, mem(req)));
+  router.post(`${v2Prefix}/memories`, (req, res) => handleV2Write(req, res, `POST:${v2Prefix}/memories`, mem(req)));
+
+  router.post(`${v2Prefix}/memories/search`, async (req, res) => {
     try {
       const parsed = v2SearchSchema.safeParse(req.body);
       if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -182,7 +192,7 @@ export const createMemoriesRouter = () => {
       const ids = resolveScopeIds({ ...body, user_id: body.user_id || fids.user_id, run_id: body.run_id || fids.run_id });
       const limit = body.top_k ?? 5;
 
-      const memory = getMemory();
+      const memory = mem(req);
       const runSearch = async (query: string, user_id?: string, run_id?: string) =>
         memory.search(query, {
           userId: user_id,
@@ -224,7 +234,7 @@ export const createMemoriesRouter = () => {
     }
   });
 
-  router.get("/v2/memories", async (req, res) => {
+  router.get(`${v2Prefix}/memories`, async (req, res) => {
     try {
       const parsed = v2ListSchema.safeParse(req.query);
       if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid query", parsed.error.flatten());
@@ -232,7 +242,7 @@ export const createMemoriesRouter = () => {
       runtimeStats.requests.list += 1;
       const q = parsed.data;
       const ids = resolveScopeIds(q);
-      const memory = getMemory();
+      const memory = mem(req);
 
       if (q.scope === "all" && q.user_id && q.run_id) {
         const [a, b] = await Promise.all([
@@ -252,7 +262,7 @@ export const createMemoriesRouter = () => {
     }
   });
 
-  router.post("/v2/memories/list", async (req, res) => {
+  router.post(`${v2Prefix}/memories/list`, async (req, res) => {
     try {
       const parsed = v2ListSchema.safeParse(req.body || {});
       if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -260,7 +270,7 @@ export const createMemoriesRouter = () => {
       const q = parsed.data;
       const fids = extractIdsFromFilters((q.filters as any) || undefined);
       const ids = resolveScopeIds({ ...q, user_id: q.user_id || fids.user_id, run_id: q.run_id || fids.run_id });
-      const memory = getMemory();
+      const memory = mem(req);
 
       if (q.scope === "all" && fids.orPairs?.length) {
         const buckets = await Promise.all(
@@ -279,10 +289,10 @@ export const createMemoriesRouter = () => {
     }
   });
 
-  router.get("/v2/memories/:id", async (req, res) => {
+  router.get(`${v2Prefix}/memories/:id`, async (req, res) => {
     try {
       runtimeStats.requests.get += 1;
-      const memory = getMemory();
+      const memory = mem(req);
       const row = await memory.get(req.params.id);
       return v2Ok(res, row);
     } catch (err: any) {
@@ -290,18 +300,18 @@ export const createMemoriesRouter = () => {
     }
   });
 
-  router.put("/v2/memories/:id", async (req, res) => {
+  router.put(`${v2Prefix}/memories/:id`, async (req, res) => {
     try {
       const parsed = v2UpdateSchema.safeParse(req.body || {});
       if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
 
-      const idem = idempotencyPrecheck(req, `PUT:/v2/memories/${req.params.id}`, parsed.data);
+      const idem = idempotencyPrecheck(req, `PUT:${v2Prefix}/memories/${req.params.id}`, parsed.data);
       if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
       if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
       runtimeStats.requests.update += 1;
       const t0 = Date.now();
-      const memory = getMemory();
+      const memory = mem(req);
       await memory.get(req.params.id);
       const updated = await (memory as any).update(req.params.id, parsed.data.text, parsed.data.metadata ? { metadata: parsed.data.metadata } : undefined);
       runtimeStats.memoryEvents.UPDATE += 1;
@@ -323,16 +333,16 @@ export const createMemoriesRouter = () => {
     }
   });
 
-  router.delete("/v2/memories/:id", async (req, res) => {
+  router.delete(`${v2Prefix}/memories/:id`, async (req, res) => {
     try {
       const payload = { id: req.params.id };
-      const idem = idempotencyPrecheck(req, `DELETE:/v2/memories/${req.params.id}`, payload);
+      const idem = idempotencyPrecheck(req, `DELETE:${v2Prefix}/memories/${req.params.id}`, payload);
       if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
       if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
       runtimeStats.requests.delete += 1;
       const t0 = Date.now();
-      const memory = getMemory();
+      const memory = mem(req);
       await memory.get(req.params.id);
 
       const memId = req.params.id;
@@ -406,12 +416,12 @@ export const createMemoriesRouter = () => {
     }
   });
 
-  router.post("/v2/memories/forget", async (req, res) => {
+  router.post(`${v2Prefix}/memories/forget`, async (req, res) => {
     try {
       const parsed = v2ForgetSchema.safeParse(req.body);
       if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
 
-      const idem = idempotencyPrecheck(req, "POST:/v2/memories/forget", parsed.data);
+      const idem = idempotencyPrecheck(req, `POST:${v2Prefix}/memories/forget`, parsed.data);
       if (idem.type === "conflict") return v2Err(res, 409, "IDEMPOTENCY_CONFLICT", idem.message);
       if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
@@ -419,7 +429,7 @@ export const createMemoriesRouter = () => {
       const deleted: string[] = [];
       let totalEdgesDeleted = 0;
       let totalNodesDeleted = 0;
-      const memory = getMemory();
+      const memory = mem(req);
 
       for (const id of memory_ids) {
         let cascadeEdgeIds: string[] = [];

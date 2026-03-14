@@ -91,6 +91,9 @@ export const IDEM_TTL_MS = Math.max(60_000, Number(process.env.IDEMPOTENCY_TTL_M
 
 export const ANALYTICS_DB_PATH = process.env.FOXMEMORY_ANALYTICS_DB_PATH || "/data/foxmemory-analytics.db";
 
+export const FOXMEMORY_REGISTRY_DB_PATH = process.env.FOXMEMORY_REGISTRY_DB_PATH || "/data/foxmemory-registry.db";
+export const DEFAULT_AGENT = process.env.DEFAULT_AGENT || "";
+
 export type RuntimeStats = {
   startedAt: string;
   writesByMode: { infer: number; raw: number };
