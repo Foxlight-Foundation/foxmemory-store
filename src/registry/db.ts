@@ -1,6 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, createHash } from "node:crypto";
 import type { TenantRecord, AgentRecord } from "./types.js";
+
+export type ApiKeyRecord = {
+  id: string;
+  name: string;
+  created_at: string;
+  revoked_at: string | null;
+};
 
 export class FoxRegistry {
   private db: DatabaseSync;
@@ -141,6 +148,40 @@ export class FoxRegistry {
     this.db.prepare(
       "DELETE FROM agent_config WHERE agent_id = ? AND key = ?"
     ).run(agentId, key);
+  };
+
+  /* ── API Keys ───────────────────────────────────────── */
+
+  createApiKey = (tenantId: string, name: string): { id: string; key: string } => {
+    const id = randomUUID();
+    const raw = randomBytes(32).toString("hex");
+    const key = `fmk_${raw}`;
+    const keyHash = createHash("sha256").update(key).digest("hex");
+    this.db.prepare(
+      "INSERT INTO tenant_api_keys (id, tenant_id, key_hash, name) VALUES (?, ?, ?, ?)"
+    ).run(id, tenantId, keyHash, name);
+    return { id, key };
+  };
+
+  validateApiKey = (key: string): { tenantId: string; keyId: string } | null => {
+    const keyHash = createHash("sha256").update(key).digest("hex");
+    const row = this.db.prepare(
+      "SELECT id, tenant_id FROM tenant_api_keys WHERE key_hash = ? AND revoked_at IS NULL"
+    ).get(keyHash) as { id: string; tenant_id: string } | undefined;
+    if (!row) return null;
+    return { tenantId: row.tenant_id, keyId: row.id };
+  };
+
+  revokeApiKey = (keyId: string): void => {
+    this.db.prepare(
+      "UPDATE tenant_api_keys SET revoked_at = datetime('now') WHERE id = ?"
+    ).run(keyId);
+  };
+
+  listApiKeys = (tenantId: string): ApiKeyRecord[] => {
+    return this.db.prepare(
+      "SELECT id, name, created_at, revoked_at FROM tenant_api_keys WHERE tenant_id = ? ORDER BY created_at ASC"
+    ).all(tenantId) as unknown as ApiKeyRecord[];
   };
 
   /* ── Utility ─────────────────────────────────────────── */

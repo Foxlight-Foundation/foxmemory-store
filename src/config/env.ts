@@ -94,6 +94,8 @@ export const ANALYTICS_DB_PATH = process.env.FOXMEMORY_ANALYTICS_DB_PATH || "/da
 export const FOXMEMORY_REGISTRY_DB_PATH = process.env.FOXMEMORY_REGISTRY_DB_PATH || "/data/foxmemory-registry.db";
 export const DEFAULT_AGENT = process.env.DEFAULT_AGENT || "";
 
+export const REQUIRE_API_KEY_AUTH = process.env.REQUIRE_API_KEY_AUTH === "true";
+
 export type RuntimeStats = {
   startedAt: string;
   writesByMode: { infer: number; raw: number };
