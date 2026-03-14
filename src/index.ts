@@ -26,7 +26,6 @@ const BUILD_TIME = process.env.BUILD_TIME || "unknown";
 // --- Shared defaults (used as fallback for per-purpose config) ---
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
-const HAS_OPENAI_API_KEY = Boolean(process.env.OPENAI_API_KEY);
 
 // --- Per-purpose inference config ---
 // Each purpose (main LLM, embedder, graph LLM) can have its own provider, base URL,
@@ -81,8 +80,10 @@ function sanitizeBaseUrl(url?: string) {
   }
 }
 
-const AUTH_MODE = HAS_OPENAI_API_KEY ? "api_key" : "local-default";
-const OPENAI_BASE_URL_SANITIZED = sanitizeBaseUrl(OPENAI_BASE_URL);
+const HAS_LLM_API_KEY = Boolean(process.env.MEM0_LLM_API_KEY || process.env.OPENAI_API_KEY);
+const HAS_EMBED_API_KEY = Boolean(process.env.MEM0_EMBED_API_KEY || process.env.OPENAI_API_KEY);
+const HAS_GRAPH_LLM_API_KEY = Boolean(process.env.MEM0_GRAPH_LLM_API_KEY || process.env.OPENAI_API_KEY);
+const AUTH_MODE = (HAS_LLM_API_KEY || HAS_EMBED_API_KEY || HAS_GRAPH_LLM_API_KEY) ? "api_key" : "local-default";
 
 // mem0 default prompts (copied from @foxlight-foundation/mem0ai prompts/index.ts).
 // Used to show the effective prompt even when no custom prompt is set.
@@ -518,8 +519,8 @@ app.get("/health", (_req, res) => {
     embedModel: EMBED_MODEL,
     diagnostics: {
       authMode: AUTH_MODE,
-      openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
-      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+      apiKeyConfigured: { llm: HAS_LLM_API_KEY, embed: HAS_EMBED_API_KEY, graphLlm: HAS_GRAPH_LLM_API_KEY },
+      baseUrl: { llm: sanitizeBaseUrl(LLM_BASE_URL), embed: sanitizeBaseUrl(EMBED_BASE_URL), graphLlm: sanitizeBaseUrl(GRAPH_LLM_BASE_URL) },
       graphEnabled: GRAPH_ENABLED,
       neo4jUrl: NEO4J_URL,
       graphLlmModel: GRAPH_ENABLED ? effectiveGraphLlmModel : null,
@@ -1557,8 +1558,8 @@ app.get("/v2/health", async (_req, res) => {
     embedModel: EMBED_MODEL,
     diagnostics: {
       authMode: AUTH_MODE,
-      openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
-      openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+      apiKeyConfigured: { llm: HAS_LLM_API_KEY, embed: HAS_EMBED_API_KEY, graphLlm: HAS_GRAPH_LLM_API_KEY },
+      baseUrl: { llm: sanitizeBaseUrl(LLM_BASE_URL), embed: sanitizeBaseUrl(EMBED_BASE_URL), graphLlm: sanitizeBaseUrl(GRAPH_LLM_BASE_URL) },
       graphEnabled: GRAPH_ENABLED,
       neo4jUrl: NEO4J_URL,
       graphLlmModel: GRAPH_ENABLED ? effectiveGraphLlmModel : null,
@@ -2918,8 +2919,8 @@ const V2_OPENAPI_SPEC = {
         type: "object",
         properties: {
           authMode: { type: "string" },
-          openaiApiKeyConfigured: { type: "boolean" },
-          openaiBaseUrl: { type: "string", nullable: true },
+          apiKeyConfigured: { type: "object", properties: { llm: { type: "boolean" }, embed: { type: "boolean" }, graphLlm: { type: "boolean" } } },
+          baseUrl: { type: "object", properties: { llm: { type: "string", nullable: true }, embed: { type: "string", nullable: true }, graphLlm: { type: "string", nullable: true } } },
           graphEnabled: { type: "boolean", description: "True when NEO4J_URL + NEO4J_PASSWORD are set." },
           neo4jUrl: { type: "string", nullable: true },
           graphLlmModel: { type: "string", nullable: true },
@@ -3384,8 +3385,8 @@ app.listen(PORT, () => {
     JSON.stringify(
       {
         authMode: AUTH_MODE,
-        openaiApiKeyConfigured: HAS_OPENAI_API_KEY,
-        openaiBaseUrl: OPENAI_BASE_URL_SANITIZED,
+        apiKeyConfigured: { llm: HAS_LLM_API_KEY, embed: HAS_EMBED_API_KEY, graphLlm: HAS_GRAPH_LLM_API_KEY },
+        baseUrl: { llm: sanitizeBaseUrl(LLM_BASE_URL), embed: sanitizeBaseUrl(EMBED_BASE_URL), graphLlm: sanitizeBaseUrl(GRAPH_LLM_BASE_URL) },
         llmModel: effectiveLlmModel,
         embedModel: EMBED_MODEL,
         qdrantHost: process.env.QDRANT_HOST || null,
