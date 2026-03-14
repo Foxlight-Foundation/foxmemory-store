@@ -23,19 +23,39 @@ const BUILD_COMMIT = process.env.GIT_SHA || process.env.BUILD_COMMIT || "unknown
 const BUILD_IMAGE_DIGEST = process.env.IMAGE_DIGEST || "unknown";
 const BUILD_TIME = process.env.BUILD_TIME || "unknown";
 
+// --- Shared defaults (used as fallback for per-purpose config) ---
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. http://foxmemory-infer:8081/v1
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "local-infer-no-key";
 const HAS_OPENAI_API_KEY = Boolean(process.env.OPENAI_API_KEY);
+
+// --- Per-purpose inference config ---
+// Each purpose (main LLM, embedder, graph LLM) can have its own provider, base URL,
+// API key, and model. Falls back to the shared OPENAI_* values when not set.
+// This allows e.g. local inference for the main LLM with cloud for embeddings.
+
+// Main LLM (fact extraction, memory decisions)
+const LLM_BASE_URL = process.env.MEM0_LLM_BASE_URL || OPENAI_BASE_URL;
+const LLM_API_KEY = process.env.MEM0_LLM_API_KEY || OPENAI_API_KEY;
 const LLM_MODEL = process.env.MEM0_LLM_MODEL || "gpt-4.1-nano";
+
+// Embedder
+const EMBED_BASE_URL = process.env.MEM0_EMBED_BASE_URL || OPENAI_BASE_URL;
+const EMBED_API_KEY = process.env.MEM0_EMBED_API_KEY || OPENAI_API_KEY;
 const EMBED_MODEL = process.env.MEM0_EMBED_MODEL || "text-embedding-3-small";
 
 // Graph memory (Neo4j). Enabled when NEO4J_URL + NEO4J_PASSWORD are set.
-// MEM0_GRAPH_LLM_MODEL lets you use a separate, more capable model for entity/relation extraction.
+// MEM0_GRAPH_LLM_* lets you use a separate, more capable model/endpoint for entity/relation extraction.
 // Recommended hosted: gpt-4o-mini. Recommended local: Qwen2.5-14B-Instruct or Mistral-Small-3.1-24B.
 const NEO4J_URL = process.env.NEO4J_URL || null;
 const NEO4J_USERNAME = process.env.NEO4J_USERNAME || "neo4j";
 const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || null;
+const GRAPH_LLM_BASE_URL = process.env.MEM0_GRAPH_LLM_BASE_URL || OPENAI_BASE_URL;
+const GRAPH_LLM_API_KEY = process.env.MEM0_GRAPH_LLM_API_KEY || OPENAI_API_KEY;
 const GRAPH_LLM_MODEL = process.env.MEM0_GRAPH_LLM_MODEL || LLM_MODEL;
+const GRAPH_EXTRACTION_STRATEGY = process.env.MEM0_GRAPH_EXTRACTION_STRATEGY as
+  | "tool_calling"
+  | "json_prompting"
+  | undefined;
 
 // Mutable effective models — start from env vars, overridden by DB on startup.
 // Use these everywhere instead of the const env vars so hot-reload works.
@@ -217,17 +237,17 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
     llm: {
       provider: "openai",
       config: {
-        apiKey: OPENAI_API_KEY,
+        apiKey: LLM_API_KEY,
         model: effectiveLlmModel,
-        ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
+        ...(LLM_BASE_URL ? { baseURL: LLM_BASE_URL } : {})
       }
     },
     embedder: {
       provider: "openai",
       config: {
-        apiKey: OPENAI_API_KEY,
+        apiKey: EMBED_API_KEY,
         model: EMBED_MODEL,
-        ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {})
+        ...(EMBED_BASE_URL ? { baseURL: EMBED_BASE_URL } : {})
       }
     },
     ...(process.env.QDRANT_HOST
@@ -265,11 +285,12 @@ function createMemory(customPrompt?: string | null, customUpdatePrompt?: string 
             llm: {
               provider: "openai",
               config: {
-                apiKey: OPENAI_API_KEY,
+                apiKey: GRAPH_LLM_API_KEY,
                 model: effectiveGraphLlmModel,
-                ...(OPENAI_BASE_URL ? { baseURL: OPENAI_BASE_URL } : {}),
+                ...(GRAPH_LLM_BASE_URL ? { baseURL: GRAPH_LLM_BASE_URL } : {}),
               },
             },
+            ...(GRAPH_EXTRACTION_STRATEGY ? { extractionStrategy: GRAPH_EXTRACTION_STRATEGY } : {}),
           },
         }
       : {}),
