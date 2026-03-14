@@ -1,6 +1,7 @@
 import { z } from "zod";
 import express from "express";
 import { randomUUID } from "node:crypto";
+import type { Memory } from "@foxlight-foundation/mem0ai/oss";
 import {
   runtimeStats,
   ADD_RETRIES,
@@ -48,8 +49,8 @@ export const captureGraphLinks = (result: any, userId?: string) => {
   }
 };
 
-export const v2Write = async (body: z.infer<typeof v2WriteSchema>) => {
-  const memory = getMemory();
+export const v2Write = async (body: z.infer<typeof v2WriteSchema>, memoryOverride?: Memory) => {
+  const memory = memoryOverride ?? getMemory();
   const userId = body.user_id;
   const runId = body.run_id;
   const metadata = body.metadata;
@@ -79,7 +80,7 @@ export const v2Write = async (body: z.infer<typeof v2WriteSchema>) => {
       userId,
       runId,
       metadata
-    });
+    }, memoryOverride);
     const hasResults = Array.isArray(inferResult?.results) && inferResult.results.length > 0;
     if (hasResults) {
       trackAddResult("infer", inferResult);
@@ -127,9 +128,10 @@ export const v2Write = async (body: z.infer<typeof v2WriteSchema>) => {
 export const executeWriteAndRecord = async (
   parsed: z.infer<typeof v2WriteSchema>,
   idem: ReturnType<typeof idempotencyPrecheck>,
+  memoryOverride?: Memory,
 ): Promise<{ status: number; body: any }> => {
   const t0 = Date.now();
-  const out = await v2Write(parsed);
+  const out = await v2Write(parsed, memoryOverride);
   const latencyMs = Date.now() - t0;
   analyticsDb?.recordWriteResults({
     results: out.result?.results || [],
@@ -159,6 +161,7 @@ export const handleV2Write = async (
   req: express.Request,
   res: express.Response,
   route: string,
+  memoryOverride?: Memory,
 ) => {
   try {
     const parsed = v2WriteSchema.safeParse(req.body);
@@ -198,7 +201,7 @@ export const handleV2Write = async (
         job.status = "running";
         try {
           const noopIdem = { type: "none" as const };
-          const { body } = await executeWriteAndRecord(parsed.data, noopIdem);
+          const { body } = await executeWriteAndRecord(parsed.data, noopIdem, memoryOverride);
           job.status = "completed";
           job.completed_at = new Date().toISOString();
           job.result = body.data;
@@ -213,7 +216,7 @@ export const handleV2Write = async (
       return res.status(202).json(acceptedBody);
     }
 
-    const { status, body } = await executeWriteAndRecord(parsed.data, idem);
+    const { status, body } = await executeWriteAndRecord(parsed.data, idem, memoryOverride);
     return res.status(status).json(body);
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));

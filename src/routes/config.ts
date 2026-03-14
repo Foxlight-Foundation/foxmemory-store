@@ -42,10 +42,13 @@ const getModelSource = (effective: string, envDefault: string, dbKey: string) =>
   return "env";
 };
 
-export const createConfigRouter = () => {
-  const router = Router();
+/**
+ * @param v2Prefix - The URL prefix for v2 routes. Default "/v2". For agent-scoped routes, pass "/v2/agents/:agentId".
+ */
+export const createConfigRouter = (v2Prefix = "/v2") => {
+  const router = Router({ mergeParams: true });
 
-  router.get("/v2/config/prompt", (_req, res) => {
+  router.get(`${v2Prefix}/config/prompt`, (_req, res) => {
     const dbPrompt = analyticsDb?.getConfig("custom_prompt") ?? null;
     const source = currentCustomPrompt
       ? dbPrompt !== null
@@ -62,7 +65,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.put("/v2/config/prompt", (req, res) => {
+  router.put(`${v2Prefix}/config/prompt`, (req, res) => {
     const parsed = v2PromptSchema.safeParse(req.body);
     if (!parsed.success) {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -79,7 +82,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.get("/v2/config/update-prompt", (_req, res) => {
+  router.get(`${v2Prefix}/config/update-prompt`, (_req, res) => {
     const dbPrompt = analyticsDb?.getConfig("custom_update_prompt") ?? null;
     const source = currentCustomUpdatePrompt
       ? dbPrompt !== null
@@ -96,7 +99,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.put("/v2/config/update-prompt", (req, res) => {
+  router.put(`${v2Prefix}/config/update-prompt`, (req, res) => {
     const parsed = v2PromptSchema.safeParse(req.body);
     if (!parsed.success) {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -113,7 +116,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.get("/v2/config/capture", (_req, res) => {
+  router.get(`${v2Prefix}/config/capture`, (_req, res) => {
     const dbVal = analyticsDb?.getConfig("capture_message_limit") ?? null;
     const source = dbVal !== null
       ? "persisted"
@@ -128,7 +131,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.put("/v2/config/capture", (req, res) => {
+  router.put(`${v2Prefix}/config/capture`, (req, res) => {
     const parsed = v2CaptureConfigSchema.safeParse(req.body);
     if (!parsed.success) {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -143,7 +146,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.delete("/v2/config/capture", (_req, res) => {
+  router.delete(`${v2Prefix}/config/capture`, (_req, res) => {
     const val = Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
     setCaptureMessageLimit(val);
     analyticsDb?.setConfig("capture_message_limit", null);
@@ -155,7 +158,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.get("/v2/config/roles", (_req, res) => {
+  router.get(`${v2Prefix}/config/roles`, (_req, res) => {
     const dbUser = analyticsDb?.getConfig("role_user_name") ?? null;
     const dbAssistant = analyticsDb?.getConfig("role_assistant_name") ?? null;
     const source = (dbUser !== null || dbAssistant !== null)
@@ -171,7 +174,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.put("/v2/config/roles", (req, res) => {
+  router.put(`${v2Prefix}/config/roles`, (req, res) => {
     const parsed = v2RolesConfigSchema.safeParse(req.body);
     if (!parsed.success) {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -197,7 +200,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.delete("/v2/config/roles", (_req, res) => {
+  router.delete(`${v2Prefix}/config/roles`, (_req, res) => {
     setRoleUserName(process.env.FOXMEMORY_ROLE_USER_NAME || "user");
     setRoleAssistantName(process.env.FOXMEMORY_ROLE_ASSISTANT_NAME || "assistant");
     analyticsDb?.setConfig("role_user_name", null);
@@ -212,7 +215,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.get("/v2/config/graph-prompt", (_req, res) => {
+  router.get(`${v2Prefix}/config/graph-prompt`, (_req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
     const dbPrompt = analyticsDb?.getConfig("custom_graph_prompt") ?? null;
     const source = currentCustomGraphPrompt
@@ -229,7 +232,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.put("/v2/config/graph-prompt", (req, res) => {
+  router.put(`${v2Prefix}/config/graph-prompt`, (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
     const parsed = v2PromptSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -245,7 +248,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.get("/v2/config/models", (_req, res) => {
+  router.get(`${v2Prefix}/config/models`, (_req, res) => {
     const catalog = analyticsDb?.getCatalogModels() ?? [];
     const findModel = (id: string) => catalog.find((m: any) => m.id === id) ?? null;
 
@@ -263,7 +266,7 @@ export const createConfigRouter = () => {
     });
   });
 
-  router.put("/v2/config/model", (req, res) => {
+  router.put(`${v2Prefix}/config/model`, (req, res) => {
     const parsed = v2SetModelSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
 
@@ -288,7 +291,7 @@ export const createConfigRouter = () => {
     return v2Ok(res, { key, value, reloaded: true });
   });
 
-  router.delete("/v2/config/model/:key", (req, res) => {
+  router.delete(`${v2Prefix}/config/model/:key`, (req, res) => {
     const key = req.params.key;
     if (!["llm_model", "graph_llm_model"].includes(key)) {
       return v2Err(res, 400, "VALIDATION_ERROR", "key must be llm_model or graph_llm_model");
@@ -308,7 +311,7 @@ export const createConfigRouter = () => {
     return v2Ok(res, { key, reverted_to: key === "llm_model" ? LLM_MODEL : GRAPH_LLM_MODEL, reloaded: true });
   });
 
-  router.get("/v2/config/models/catalog", (req, res) => {
+  router.get(`${v2Prefix}/config/models/catalog`, (req, res) => {
     const role = req.query.role as string | undefined;
     if (role && !MODEL_ROLES.includes(role as ModelRole)) {
       return v2Err(res, 400, "VALIDATION_ERROR", `role must be one of: ${MODEL_ROLES.join(", ")}`);
@@ -317,7 +320,7 @@ export const createConfigRouter = () => {
     return v2Ok(res, { models, count: models.length });
   });
 
-  router.post("/v2/config/models/catalog", (req, res) => {
+  router.post(`${v2Prefix}/config/models/catalog`, (req, res) => {
     if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
     const parsed = v2CatalogUpsertSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
@@ -326,7 +329,7 @@ export const createConfigRouter = () => {
     return v2Ok(res, { model });
   });
 
-  router.put("/v2/config/models/catalog/:id", (req, res) => {
+  router.put(`${v2Prefix}/config/models/catalog/:id`, (req, res) => {
     if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
     const existing = analyticsDb.getCatalogModel(req.params.id);
     if (!existing) return v2Err(res, 404, "NOT_FOUND", `Model '${req.params.id}' not found in catalog`);
@@ -337,7 +340,7 @@ export const createConfigRouter = () => {
     return v2Ok(res, { model });
   });
 
-  router.delete("/v2/config/models/catalog/:id", (req, res) => {
+  router.delete(`${v2Prefix}/config/models/catalog/:id`, (req, res) => {
     if (!analyticsDb?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Analytics DB not available");
     const deleted = analyticsDb.deleteCatalogModel(req.params.id);
     if (!deleted) return v2Err(res, 404, "NOT_FOUND", `Model '${req.params.id}' not found in catalog`);
