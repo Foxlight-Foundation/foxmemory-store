@@ -97,5 +97,48 @@ export const createAdminRouter = () => {
     return v2Ok(res, { ...agent, status: "archived" }, { version: "v2" });
   });
 
+  /* ── API Keys ───────────────────────────────────────── */
+
+  router.post("/v2/tenants/:tenantId/api-keys", (req, res) => {
+    if (!registry?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Registry not available");
+
+    const tenant = registry.getTenant(req.params.tenantId);
+    if (!tenant) return v2Err(res, 404, "NOT_FOUND", `Tenant ${req.params.tenantId} not found`);
+
+    const { name } = req.body ?? {};
+    if (!name || typeof name !== "string") return v2Err(res, 400, "VALIDATION_ERROR", "name is required");
+
+    try {
+      const { id, key } = registry.createApiKey(tenant.id, name);
+      return v2Ok(res, { id, key, name }, { version: "v2" });
+    } catch (err: any) {
+      return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+    }
+  });
+
+  router.get("/v2/tenants/:tenantId/api-keys", (req, res) => {
+    if (!registry?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Registry not available");
+
+    const tenant = registry.getTenant(req.params.tenantId);
+    if (!tenant) return v2Err(res, 404, "NOT_FOUND", `Tenant ${req.params.tenantId} not found`);
+
+    const keys = registry.listApiKeys(tenant.id);
+    return v2Ok(res, { keys, count: keys.length }, { version: "v2" });
+  });
+
+  router.delete("/v2/tenants/:tenantId/api-keys/:keyId", (req, res) => {
+    if (!registry?.ready) return v2Err(res, 503, "SERVICE_UNAVAILABLE", "Registry not available");
+
+    const tenant = registry.getTenant(req.params.tenantId);
+    if (!tenant) return v2Err(res, 404, "NOT_FOUND", `Tenant ${req.params.tenantId} not found`);
+
+    try {
+      registry.revokeApiKey(req.params.keyId);
+      return v2Ok(res, { id: req.params.keyId, revoked: true }, { version: "v2" });
+    } catch (err: any) {
+      return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
+    }
+  });
+
   return router;
 };

@@ -31,6 +31,7 @@ import { initRegistry, registry } from "./registry/db.js";
 import { migrateToRegistry } from "./registry/migrate.js";
 import { recreateMemory } from "./memory/factory.js";
 import { agentResolver } from "./middleware/agentResolver.js";
+import { apiKeyAuth } from "./middleware/apiKeyAuth.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createMemoriesRouter } from "./routes/memories.js";
 import { createConfigRouter } from "./routes/config.js";
@@ -104,6 +105,9 @@ export const createApp = () => {
     console.log("[registry] initialized");
     migrateToRegistry(reg, analyticsDb);
   }
+
+  /* ── API key auth (after JSON parsing, before routes) ── */
+  app.use(apiKeyAuth);
 
   /* ── Legacy routes (no prefix change) ────────────────── */
   app.use(createHealthRouter());
