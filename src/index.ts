@@ -51,10 +51,13 @@ const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || null;
 const GRAPH_LLM_BASE_URL = process.env.MEM0_GRAPH_LLM_BASE_URL || OPENAI_BASE_URL;
 const GRAPH_LLM_API_KEY = process.env.MEM0_GRAPH_LLM_API_KEY || OPENAI_API_KEY;
 const GRAPH_LLM_MODEL = process.env.MEM0_GRAPH_LLM_MODEL || LLM_MODEL;
-const GRAPH_EXTRACTION_STRATEGY = process.env.MEM0_GRAPH_EXTRACTION_STRATEGY as
-  | "tool_calling"
-  | "json_prompting"
-  | undefined;
+const GRAPH_EXTRACTION_STRATEGY = (() => {
+  const raw = process.env.MEM0_GRAPH_EXTRACTION_STRATEGY;
+  if (!raw) return undefined;
+  if (raw === "tool_calling" || raw === "json_prompting") return raw;
+  console.warn(`[config] invalid MEM0_GRAPH_EXTRACTION_STRATEGY "${raw}" — must be "tool_calling" or "json_prompting", falling back to "tool_calling"`);
+  return "tool_calling" as const;
+})();
 
 // Mutable effective models — start from env vars, overridden by DB on startup.
 // Use these everywhere instead of the const env vars so hot-reload works.
@@ -83,7 +86,7 @@ function sanitizeBaseUrl(url?: string) {
 const HAS_LLM_API_KEY = Boolean(process.env.MEM0_LLM_API_KEY || process.env.OPENAI_API_KEY);
 const HAS_EMBED_API_KEY = Boolean(process.env.MEM0_EMBED_API_KEY || process.env.OPENAI_API_KEY);
 const HAS_GRAPH_LLM_API_KEY = Boolean(process.env.MEM0_GRAPH_LLM_API_KEY || process.env.OPENAI_API_KEY);
-const AUTH_MODE = (HAS_LLM_API_KEY || HAS_EMBED_API_KEY || HAS_GRAPH_LLM_API_KEY) ? "api_key" : "local-default";
+const AUTH_MODE = (HAS_LLM_API_KEY || HAS_EMBED_API_KEY || (GRAPH_ENABLED && HAS_GRAPH_LLM_API_KEY)) ? "api_key" : "local-default";
 
 // mem0 default prompts (copied from @foxlight-foundation/mem0ai prompts/index.ts).
 // Used to show the effective prompt even when no custom prompt is set.
