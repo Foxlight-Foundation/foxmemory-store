@@ -25,6 +25,7 @@ import {
 } from "../config/env.js";
 import { DEFAULT_EXTRACT_PROMPT, DEFAULT_UPDATE_PROMPT, DEFAULT_CAPTURE_MESSAGE_LIMIT } from "../config/defaults.js";
 import { analyticsDb } from "../analytics/db.js";
+import { registry } from "../registry/db.js";
 import { recreateMemory } from "../memory/factory.js";
 import { v2Ok, v2Err } from "../utils/response.js";
 import {
@@ -48,7 +49,16 @@ const getModelSource = (effective: string, envDefault: string, dbKey: string) =>
 export const createConfigRouter = (v2Prefix = "/v2") => {
   const router = Router({ mergeParams: true });
 
-  router.get(`${v2Prefix}/config/prompt`, (_req, res) => {
+  router.get(`${v2Prefix}/config/prompt`, (req, res) => {
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      const agentCfg = registry.getAgentConfig(agentId);
+      const agentPrompt = agentCfg["custom_prompt"] ?? null;
+      const globalPrompt = analyticsDb?.getConfig("custom_prompt") ?? currentCustomPrompt;
+      const effective = agentPrompt ?? globalPrompt ?? DEFAULT_EXTRACT_PROMPT();
+      const source = agentPrompt ? "agent" : globalPrompt ? "global" : "default";
+      return v2Ok(res, { prompt: agentPrompt ?? globalPrompt, effective_prompt: effective, source, persisted: true });
+    }
     const dbPrompt = analyticsDb?.getConfig("custom_prompt") ?? null;
     const source = currentCustomPrompt
       ? dbPrompt !== null
@@ -71,6 +81,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
     }
     const newPrompt = parsed.data.prompt;
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      if (newPrompt) {
+        registry.setAgentConfig(agentId, "custom_prompt", newPrompt);
+      } else {
+        registry.deleteAgentConfig(agentId, "custom_prompt");
+      }
+      console.log(`[config] agent ${agentId} custom prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to global"}`);
+      return v2Ok(res, { prompt: newPrompt, source: newPrompt ? "agent" : "global", persisted: true });
+    }
     setCurrentCustomPrompt(newPrompt);
     recreateMemory(newPrompt, currentCustomUpdatePrompt, currentCustomGraphPrompt);
     analyticsDb?.setConfig("custom_prompt", newPrompt);
@@ -82,7 +102,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     });
   });
 
-  router.get(`${v2Prefix}/config/update-prompt`, (_req, res) => {
+  router.get(`${v2Prefix}/config/update-prompt`, (req, res) => {
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      const agentCfg = registry.getAgentConfig(agentId);
+      const agentPrompt = agentCfg["custom_update_prompt"] ?? null;
+      const globalPrompt = analyticsDb?.getConfig("custom_update_prompt") ?? currentCustomUpdatePrompt;
+      const effective = agentPrompt ?? globalPrompt ?? DEFAULT_UPDATE_PROMPT;
+      const source = agentPrompt ? "agent" : globalPrompt ? "global" : "default";
+      return v2Ok(res, { prompt: agentPrompt ?? globalPrompt, effective_prompt: effective, source, persisted: true });
+    }
     const dbPrompt = analyticsDb?.getConfig("custom_update_prompt") ?? null;
     const source = currentCustomUpdatePrompt
       ? dbPrompt !== null
@@ -105,6 +134,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
     }
     const newPrompt = parsed.data.prompt;
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      if (newPrompt) {
+        registry.setAgentConfig(agentId, "custom_update_prompt", newPrompt);
+      } else {
+        registry.deleteAgentConfig(agentId, "custom_update_prompt");
+      }
+      console.log(`[config] agent ${agentId} custom update prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to global"}`);
+      return v2Ok(res, { prompt: newPrompt, source: newPrompt ? "agent" : "global", persisted: true });
+    }
     setCurrentCustomUpdatePrompt(newPrompt);
     recreateMemory(currentCustomPrompt, newPrompt, currentCustomGraphPrompt);
     analyticsDb?.setConfig("custom_update_prompt", newPrompt);
@@ -116,7 +155,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     });
   });
 
-  router.get(`${v2Prefix}/config/capture`, (_req, res) => {
+  router.get(`${v2Prefix}/config/capture`, (req, res) => {
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      const agentCfg = registry.getAgentConfig(agentId);
+      const agentVal = agentCfg["capture_message_limit"] ?? null;
+      const globalVal = analyticsDb?.getConfig("capture_message_limit") ?? null;
+      const effective = agentVal ? Number(agentVal) : globalVal ? Number(globalVal) : captureMessageLimit;
+      const source = agentVal ? "agent" : globalVal ? "global" : "default";
+      return v2Ok(res, { capture_message_limit: effective, default: DEFAULT_CAPTURE_MESSAGE_LIMIT, source, persisted: true });
+    }
     const dbVal = analyticsDb?.getConfig("capture_message_limit") ?? null;
     const source = dbVal !== null
       ? "persisted"
@@ -136,6 +184,12 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     if (!parsed.success) {
       return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
     }
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      registry.setAgentConfig(agentId, "capture_message_limit", String(parsed.data.capture_message_limit));
+      console.log(`[config] agent ${agentId} capture message limit updated: ${parsed.data.capture_message_limit}`);
+      return v2Ok(res, { capture_message_limit: parsed.data.capture_message_limit, source: "agent", persisted: true });
+    }
     setCaptureMessageLimit(parsed.data.capture_message_limit);
     analyticsDb?.setConfig("capture_message_limit", String(parsed.data.capture_message_limit));
     console.log(`[config] capture message limit updated: ${parsed.data.capture_message_limit}`);
@@ -146,7 +200,15 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     });
   });
 
-  router.delete(`${v2Prefix}/config/capture`, (_req, res) => {
+  router.delete(`${v2Prefix}/config/capture`, (req, res) => {
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      registry.deleteAgentConfig(agentId, "capture_message_limit");
+      const globalVal = analyticsDb?.getConfig("capture_message_limit") ?? null;
+      const effective = globalVal ? Number(globalVal) : Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
+      console.log(`[config] agent ${agentId} capture message limit reset to global: ${effective}`);
+      return v2Ok(res, { capture_message_limit: effective, source: globalVal ? "global" : "default", persisted: true });
+    }
     const val = Number(process.env.FOXMEMORY_CAPTURE_MESSAGE_LIMIT || DEFAULT_CAPTURE_MESSAGE_LIMIT);
     setCaptureMessageLimit(val);
     analyticsDb?.setConfig("capture_message_limit", null);
@@ -158,7 +220,19 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     });
   });
 
-  router.get(`${v2Prefix}/config/roles`, (_req, res) => {
+  router.get(`${v2Prefix}/config/roles`, (req, res) => {
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      const agentCfg = registry.getAgentConfig(agentId);
+      const agentUser = agentCfg["role_user_name"] ?? null;
+      const agentAssistant = agentCfg["role_assistant_name"] ?? null;
+      const globalUser = analyticsDb?.getConfig("role_user_name") ?? null;
+      const globalAssistant = analyticsDb?.getConfig("role_assistant_name") ?? null;
+      const effectiveUser = agentUser ?? globalUser ?? roleUserName;
+      const effectiveAssistant = agentAssistant ?? globalAssistant ?? roleAssistantName;
+      const source = (agentUser || agentAssistant) ? "agent" : (globalUser || globalAssistant) ? "global" : "default";
+      return v2Ok(res, { user: effectiveUser, assistant: effectiveAssistant, source, persisted: true });
+    }
     const dbUser = analyticsDb?.getConfig("role_user_name") ?? null;
     const dbAssistant = analyticsDb?.getConfig("role_assistant_name") ?? null;
     const source = (dbUser !== null || dbAssistant !== null)
@@ -182,6 +256,19 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     if (!parsed.data.user && !parsed.data.assistant) {
       return v2Err(res, 400, "VALIDATION_ERROR", "At least one of 'user' or 'assistant' must be provided");
     }
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      if (parsed.data.user) registry.setAgentConfig(agentId, "role_user_name", parsed.data.user);
+      if (parsed.data.assistant) registry.setAgentConfig(agentId, "role_assistant_name", parsed.data.assistant);
+      const agentCfg = registry.getAgentConfig(agentId);
+      console.log(`[config] agent ${agentId} role names updated: user=${agentCfg["role_user_name"] ?? roleUserName}, assistant=${agentCfg["role_assistant_name"] ?? roleAssistantName}`);
+      return v2Ok(res, {
+        user: agentCfg["role_user_name"] ?? roleUserName,
+        assistant: agentCfg["role_assistant_name"] ?? roleAssistantName,
+        source: "agent",
+        persisted: true,
+      });
+    }
     if (parsed.data.user) {
       setRoleUserName(parsed.data.user);
       analyticsDb?.setConfig("role_user_name", parsed.data.user);
@@ -200,7 +287,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     });
   });
 
-  router.delete(`${v2Prefix}/config/roles`, (_req, res) => {
+  router.delete(`${v2Prefix}/config/roles`, (req, res) => {
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      registry.deleteAgentConfig(agentId, "role_user_name");
+      registry.deleteAgentConfig(agentId, "role_assistant_name");
+      const globalUser = analyticsDb?.getConfig("role_user_name") ?? roleUserName;
+      const globalAssistant = analyticsDb?.getConfig("role_assistant_name") ?? roleAssistantName;
+      console.log(`[config] agent ${agentId} role names reset to global: user=${globalUser}, assistant=${globalAssistant}`);
+      return v2Ok(res, { user: globalUser, assistant: globalAssistant, source: "global", persisted: true });
+    }
     setRoleUserName(process.env.FOXMEMORY_ROLE_USER_NAME || "user");
     setRoleAssistantName(process.env.FOXMEMORY_ROLE_ASSISTANT_NAME || "assistant");
     analyticsDb?.setConfig("role_user_name", null);
@@ -215,8 +311,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     });
   });
 
-  router.get(`${v2Prefix}/config/graph-prompt`, (_req, res) => {
+  router.get(`${v2Prefix}/config/graph-prompt`, (req, res) => {
     if (!GRAPH_ENABLED) return v2Err(res, 400, "BAD_REQUEST", "Graph memory is not enabled");
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      const agentCfg = registry.getAgentConfig(agentId);
+      const agentPrompt = agentCfg["custom_graph_prompt"] ?? null;
+      const globalPrompt = analyticsDb?.getConfig("custom_graph_prompt") ?? currentCustomGraphPrompt;
+      const source = agentPrompt ? "agent" : globalPrompt ? "global" : "default";
+      return v2Ok(res, { prompt: agentPrompt ?? globalPrompt, source, persisted: true });
+    }
     const dbPrompt = analyticsDb?.getConfig("custom_graph_prompt") ?? null;
     const source = currentCustomGraphPrompt
       ? dbPrompt !== null
@@ -237,6 +341,16 @@ export const createConfigRouter = (v2Prefix = "/v2") => {
     const parsed = v2PromptSchema.safeParse(req.body);
     if (!parsed.success) return v2Err(res, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.flatten());
     const newPrompt = parsed.data.prompt;
+    const agentId = (req as any).agent?.id as string | undefined;
+    if (agentId && registry?.ready) {
+      if (newPrompt) {
+        registry.setAgentConfig(agentId, "custom_graph_prompt", newPrompt);
+      } else {
+        registry.deleteAgentConfig(agentId, "custom_graph_prompt");
+      }
+      console.log(`[config] agent ${agentId} custom graph prompt updated: ${newPrompt ? `${newPrompt.slice(0, 80)}...` : "reset to global"}`);
+      return v2Ok(res, { prompt: newPrompt, source: newPrompt ? "agent" : "global", persisted: true });
+    }
     setCurrentCustomGraphPrompt(newPrompt);
     recreateMemory(currentCustomPrompt, currentCustomUpdatePrompt, newPrompt);
     analyticsDb?.setConfig("custom_graph_prompt", newPrompt);

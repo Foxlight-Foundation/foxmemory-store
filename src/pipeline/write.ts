@@ -34,7 +34,7 @@ export const trackAddResult = (mode: "infer" | "raw", result: any) => {
   }
 };
 
-export const captureGraphLinks = (result: any, userId?: string) => {
+export const captureGraphLinks = (result: any, userId?: string, agentId?: string) => {
   if (!analyticsDb?.ready || !GRAPH_ENABLED) return;
   const nodeIds: string[] = result?.added_node_ids ?? [];
   const edgeIds: string[] = result?.added_edge_ids ?? [];
@@ -44,7 +44,7 @@ export const captureGraphLinks = (result: any, userId?: string) => {
     const ev = String(r?.metadata?.event || r?.event || "").toUpperCase();
     if (ev === "ADD" || ev === "UPDATE") {
       const memId = r?.id ?? r?.memory_id;
-      if (memId) analyticsDb.insertGraphLinks(memId, nodeIds, edgeIds, userId);
+      if (memId) analyticsDb.insertGraphLinks(memId, nodeIds, edgeIds, userId, agentId);
     }
   }
 };
@@ -129,6 +129,7 @@ export const executeWriteAndRecord = async (
   parsed: z.infer<typeof v2WriteSchema>,
   idem: ReturnType<typeof idempotencyPrecheck>,
   memoryOverride?: Memory,
+  agentId?: string,
 ): Promise<{ status: number; body: any }> => {
   const t0 = Date.now();
   const out = await v2Write(parsed, memoryOverride);
@@ -139,6 +140,7 @@ export const executeWriteAndRecord = async (
     latencyMs,
     inferMode: parsed.infer_preferred !== false,
     decisions: (out as any).decisions ?? undefined,
+    agentId,
   });
   if (GRAPH_ENABLED) {
     const graphRelations: any[] = (out as any).relations || [];
@@ -149,6 +151,7 @@ export const executeWriteAndRecord = async (
       entitiesAdded: addedEntities.length,
       relationsAdded: graphRelations.length,
       latencyMs,
+      agentId,
     });
   }
   const body = { ok: true, data: out };
@@ -172,6 +175,8 @@ export const handleV2Write = async (
     if (idem.type === "replay") return res.status(idem.status).json(idem.body);
 
     runtimeStats.requests.add += 1;
+
+    const reqAgentId = (req as any).agent?.id as string | undefined;
 
     if (parsed.data.async) {
       const inFlightCount = [...asyncJobs.values()].filter(j => j.status === "pending" || j.status === "running").length;
@@ -201,7 +206,7 @@ export const handleV2Write = async (
         job.status = "running";
         try {
           const noopIdem = { type: "none" as const };
-          const { body } = await executeWriteAndRecord(parsed.data, noopIdem, memoryOverride);
+          const { body } = await executeWriteAndRecord(parsed.data, noopIdem, memoryOverride, reqAgentId);
           job.status = "completed";
           job.completed_at = new Date().toISOString();
           job.result = body.data;
@@ -216,7 +221,7 @@ export const handleV2Write = async (
       return res.status(202).json(acceptedBody);
     }
 
-    const { status, body } = await executeWriteAndRecord(parsed.data, idem, memoryOverride);
+    const { status, body } = await executeWriteAndRecord(parsed.data, idem, memoryOverride, reqAgentId);
     return res.status(status).json(body);
   } catch (err: any) {
     return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));

@@ -10,30 +10,35 @@ import { v2StatsMemoriesQuerySchema, v2WriteEventsQuerySchema } from "../schemas
 export const createStatsRouter = (v2Prefix = "/v2") => {
   const router = Router({ mergeParams: true });
 
-  router.get(`${v2Prefix}/stats`, (_req, res) => {
+  router.get(`${v2Prefix}/stats`, (req, res) => {
     const started = Date.parse(runtimeStats.startedAt);
     const uptimeSec = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : null;
+    const agentId = (req as any).agent?.id as string | undefined;
 
     let writesByMode = runtimeStats.writesByMode;
     let memoryEvents = runtimeStats.memoryEvents;
     if (analyticsDb?.ready) {
       try {
         const db = (analyticsDb as any).db;
+        const agentFilter = agentId ? " WHERE agent_id = ?" : "";
+        const agentFilterAnd = agentId ? " AND agent_id = ?" : "";
+        const agentParams = agentId ? [agentId] : [];
+
         const modeRow = db.prepare(
           `SELECT
              SUM(CASE WHEN infer_mode = 1 THEN 1 ELSE 0 END) AS infer,
              SUM(CASE WHEN infer_mode = 0 THEN 1 ELSE 0 END) AS raw
            FROM (
              SELECT COALESCE(call_id, id) AS call_key, MAX(infer_mode) AS infer_mode
-             FROM write_events
+             FROM write_events${agentFilter}
              GROUP BY call_key
            )`
-        ).get() as any;
+        ).get(...agentParams) as any;
         writesByMode = { infer: Number(modeRow?.infer ?? 0), raw: Number(modeRow?.raw ?? 0) };
 
         const events = db.prepare(
-          `SELECT event_type, COUNT(*) AS n FROM write_events GROUP BY event_type`
-        ).all() as any[];
+          `SELECT event_type, COUNT(*) AS n FROM write_events${agentFilter} GROUP BY event_type`
+        ).all(...agentParams) as any[];
         memoryEvents = { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 };
         for (const r of events) {
           if (r.event_type in memoryEvents) (memoryEvents as any)[r.event_type] = Number(r.n);
@@ -62,7 +67,8 @@ export const createStatsRouter = (v2Prefix = "/v2") => {
     from.setDate(from.getDate() - days);
     const window = { days, from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
 
-    const stats = analyticsDb?.getStats(days) ?? null;
+    const agentId = (req as any).agent?.id as string | undefined;
+    const stats = analyticsDb?.getStats(days, agentId) ?? null;
 
     if (!stats) {
       return v2Ok(res, {
@@ -95,7 +101,9 @@ export const createStatsRouter = (v2Prefix = "/v2") => {
       const { user_id, run_id, memory_id, event_type, limit, before } = parsed.data;
       const conditions: string[] = [];
       const params: any[] = [];
+      const agentId = (req as any).agent?.id as string | undefined;
 
+      if (agentId)    { conditions.push("agent_id = ?");   params.push(agentId); }
       if (user_id)    { conditions.push("user_id = ?");    params.push(user_id); }
       if (run_id)     { conditions.push("run_id = ?");     params.push(run_id); }
       if (memory_id)  { conditions.push("memory_id = ?");  params.push(memory_id); }

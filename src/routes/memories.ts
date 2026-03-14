@@ -218,7 +218,7 @@ export const createMemoriesRouter = (v2Prefix = "/v2") => {
         const dedup = Array.from(new Map(merged.map((r: any) => [r.id || JSON.stringify(r), r])).values()).slice(0, limit);
         const relations = [...(a?.relations || []), ...(b?.relations || [])];
         const topScore = dedup[0]?.score ?? dedup[0]?.similarity ?? undefined;
-        analyticsDb?.recordSearch({ user_id: body.user_id, run_id: body.run_id, queryChars: body.query.length, resultCount: dedup.length, topScore, latencyMs: Date.now() - t0, graphHit: relations.length > 0 });
+        analyticsDb?.recordSearch({ user_id: body.user_id, run_id: body.run_id, queryChars: body.query.length, resultCount: dedup.length, topScore, latencyMs: Date.now() - t0, graphHit: relations.length > 0, agentId: (req as any).agent?.id });
         return v2Ok(res, { results: dedup, ...(GRAPH_ENABLED ? { relations } : {}) }, { scope: "all", count: dedup.length });
       }
 
@@ -227,7 +227,7 @@ export const createMemoriesRouter = (v2Prefix = "/v2") => {
       const results = result?.results || [];
       const relations = result?.relations || [];
       const topScore = (results[0] as any)?.score ?? (results[0] as any)?.similarity ?? undefined;
-      analyticsDb?.recordSearch({ user_id: ids.user_id, run_id: ids.run_id, queryChars: body.query.length, resultCount: results.length, topScore, latencyMs: Date.now() - t0, graphHit: relations.length > 0 });
+      analyticsDb?.recordSearch({ user_id: ids.user_id, run_id: ids.run_id, queryChars: body.query.length, resultCount: results.length, topScore, latencyMs: Date.now() - t0, graphHit: relations.length > 0, agentId: (req as any).agent?.id });
       return v2Ok(res, { results, ...(GRAPH_ENABLED ? { relations } : {}) }, { scope: body.scope || "direct", count: results.length });
     } catch (err: any) {
       return v2Err(res, 500, "INTERNAL_ERROR", String(err?.message || err));
@@ -320,6 +320,7 @@ export const createMemoriesRouter = (v2Prefix = "/v2") => {
         inputChars: parsed.data.text.length,
         latencyMs: Date.now() - t0,
         inferMode: false,
+        agentId: (req as any).agent?.id,
       });
       const body = { ok: true, data: updated || { id: req.params.id, text: parsed.data.text } };
       const status = 200;
@@ -394,6 +395,7 @@ export const createMemoriesRouter = (v2Prefix = "/v2") => {
         latencyMs: Date.now() - t0,
         inputChars: 0,
         inferMode: false,
+        agentId: (req as any).agent?.id,
       });
       const body = {
         ok: true,

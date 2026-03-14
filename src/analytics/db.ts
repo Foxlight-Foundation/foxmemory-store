@@ -87,6 +87,10 @@ export class FoxAnalyticsDB {
       "ALTER TABLE write_events  ADD COLUMN extracted_facts_json TEXT",
       "ALTER TABLE write_events  ADD COLUMN candidates_json      TEXT",
       "ALTER TABLE search_events ADD COLUMN graph_hit INTEGER DEFAULT 0",
+      "ALTER TABLE write_events  ADD COLUMN agent_id             TEXT",
+      "ALTER TABLE search_events ADD COLUMN agent_id             TEXT",
+      "ALTER TABLE graph_events  ADD COLUMN agent_id             TEXT",
+      "ALTER TABLE memory_graph_links ADD COLUMN agent_id        TEXT",
     ]) {
       try { this.db.exec(sql); } catch { /* column already exists */ }
     }
@@ -116,6 +120,7 @@ export class FoxAnalyticsDB {
     latencyMs: number;
     inferMode: boolean;
     decisions?: { extractedFacts: string[]; candidates: { id: string; text: string }[]; actions: any[] };
+    agentId?: string;
   }) {
     if (!this.ready) return;
     const ts = new Date().toISOString();
@@ -125,8 +130,8 @@ export class FoxAnalyticsDB {
     const candidatesJson = opts.decisions?.candidates?.length
       ? JSON.stringify(opts.decisions.candidates) : null;
     const stmt = this.db.prepare(
-      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode, call_id, reason, extracted_facts_json, candidates_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO write_events (id, ts, event_type, memory_id, user_id, run_id, input_chars, output_text, llm_model, latency_ms, infer_mode, call_id, reason, extracted_facts_json, candidates_json, agent_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const noneActions = opts.results.length === 0
       ? (opts.decisions?.actions || []).filter((a: any) => String(a?.event || "").toUpperCase() === "NONE")
@@ -144,7 +149,8 @@ export class FoxAnalyticsDB {
           opts.user_id ?? null, opts.run_id ?? null,
           opts.inputChars, memText, effectiveLlmModel,
           opts.latencyMs, opts.inferMode ? 1 : 0, callId,
-          reason, extractedFactsJson, candidatesJson
+          reason, extractedFactsJson, candidatesJson,
+          opts.agentId ?? null
         );
       } catch { /* non-critical */ }
     }
@@ -158,17 +164,19 @@ export class FoxAnalyticsDB {
     topScore?: number;
     latencyMs: number;
     graphHit?: boolean;
+    agentId?: string;
   }) {
     if (!this.ready) return;
     try {
       this.db.prepare(
-        `INSERT INTO search_events (id, ts, user_id, run_id, query_chars, result_count, top_score, latency_ms, graph_hit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO search_events (id, ts, user_id, run_id, query_chars, result_count, top_score, latency_ms, graph_hit, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         crypto.randomUUID(), new Date().toISOString(),
         opts.user_id ?? null, opts.run_id ?? null,
         opts.queryChars, opts.resultCount, opts.topScore ?? null, opts.latencyMs,
-        opts.graphHit ? 1 : 0
+        opts.graphHit ? 1 : 0,
+        opts.agentId ?? null
       );
     } catch { /* non-critical */ }
   }
@@ -179,26 +187,32 @@ export class FoxAnalyticsDB {
     entitiesAdded?: number;
     relationsAdded?: number;
     latencyMs: number;
+    agentId?: string;
   }) {
     if (!this.ready) return;
     try {
       this.db.prepare(
-        `INSERT INTO graph_events (id, ts, user_id, run_id, entities_added, relations_added, latency_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO graph_events (id, ts, user_id, run_id, entities_added, relations_added, latency_ms, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         crypto.randomUUID(), new Date().toISOString(),
         opts.user_id ?? null, opts.run_id ?? null,
-        opts.entitiesAdded ?? null, opts.relationsAdded ?? null, opts.latencyMs
+        opts.entitiesAdded ?? null, opts.relationsAdded ?? null, opts.latencyMs,
+        opts.agentId ?? null
       );
     } catch { /* non-critical */ }
   }
 
-  getStats(days: number) {
+  getStats(days: number, agentId?: string) {
     if (!this.ready) return null;
     try {
+      const agentFilter = agentId ? " AND agent_id = ?" : "";
+      const agentFilterWhere = agentId ? " WHERE agent_id = ?" : "";
+      const agentParams = agentId ? [agentId] : [];
+
       const eventRows = this.db.prepare(
-        `SELECT event_type, COUNT(*) as count FROM write_events GROUP BY event_type`
-      ).all() as Array<{ event_type: string; count: number }>;
+        `SELECT event_type, COUNT(*) as count FROM write_events${agentFilterWhere} GROUP BY event_type`
+      ).all(...agentParams) as Array<{ event_type: string; count: number }>;
 
       const byEvent: Record<string, number> = { ADD: 0, UPDATE: 0, DELETE: 0, NONE: 0 };
       for (const r of eventRows) {
@@ -209,8 +223,8 @@ export class FoxAnalyticsDB {
         SELECT
           COUNT(DISTINCT call_id) as totalCalls,
           COUNT(DISTINCT CASE WHEN event_type = 'NONE' THEN call_id END) as noneCalls
-        FROM write_events WHERE call_id IS NOT NULL
-      `).get() as any;
+        FROM write_events WHERE call_id IS NOT NULL${agentFilter}
+      `).get(...agentParams) as any;
       const noneRatePct = (callStats?.totalCalls ?? 0) > 0
         ? Math.round(((callStats.noneCalls ?? 0) / callStats.totalCalls) * 100)
         : 0;
@@ -218,17 +232,17 @@ export class FoxAnalyticsDB {
 
       const latRow = this.db.prepare(
         `SELECT AVG(latency_ms) as avg, MIN(latency_ms) as min, MAX(latency_ms) as max
-         FROM write_events WHERE latency_ms IS NOT NULL`
-      ).get() as any;
+         FROM write_events WHERE latency_ms IS NOT NULL${agentFilter}`
+      ).get(...agentParams) as any;
 
       const byDayRaw = this.db.prepare(`
         SELECT date(ts) as date, event_type, COUNT(*) as count,
                CAST(AVG(latency_ms) AS INTEGER) as avg_latency_ms
         FROM write_events
-        WHERE ts >= datetime('now', '-' || ? || ' days')
+        WHERE ts >= datetime('now', '-' || ? || ' days')${agentFilter}
         GROUP BY date(ts), event_type
         ORDER BY date(ts) ASC
-      `).all(days) as Array<{ date: string; event_type: string; count: number; avg_latency_ms: number | null }>;
+      `).all(days, ...agentParams) as Array<{ date: string; event_type: string; count: number; avg_latency_ms: number | null }>;
 
       const byDayMap = new Map<string, { date: string; ADD: number; UPDATE: number; DELETE: number; NONE: number; avgLatencyMs: number | null }>();
       for (const r of byDayRaw) {
@@ -240,8 +254,8 @@ export class FoxAnalyticsDB {
 
       const recent = this.db.prepare(`
         SELECT ts, event_type, memory_id, user_id, run_id, output_text, reason, latency_ms, infer_mode
-        FROM write_events ORDER BY ts DESC LIMIT 20
-      `).all() as any[];
+        FROM write_events${agentFilterWhere} ORDER BY ts DESC LIMIT 20
+      `).all(...agentParams) as any[];
 
       const searchRow = this.db.prepare(`
         SELECT COUNT(*) as total,
@@ -250,8 +264,8 @@ export class FoxAnalyticsDB {
                CAST(AVG(result_count) * 10 AS INTEGER) / 10.0 as avgResults,
                CAST(AVG(top_score) * 1000 AS INTEGER) / 1000.0 as avgTopScore,
                CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
-        FROM search_events
-      `).get() as any;
+        FROM search_events${agentFilterWhere}
+      `).get(...agentParams) as any;
 
       const searchTotal = searchRow?.total ?? 0;
       const zeroResultRatePct = searchTotal > 0
@@ -267,18 +281,18 @@ export class FoxAnalyticsDB {
                SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END) as zeroResults,
                CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
         FROM search_events
-        WHERE ts >= datetime('now', '-' || ? || ' days')
+        WHERE ts >= datetime('now', '-' || ? || ' days')${agentFilter}
         GROUP BY date(ts)
         ORDER BY date(ts) ASC
-      `).all(days) as Array<{ date: string; count: number; zeroResults: number; avgLatencyMs: number | null }>;
+      `).all(days, ...agentParams) as Array<{ date: string; count: number; zeroResults: number; avgLatencyMs: number | null }>;
 
       const graphRow = this.db.prepare(`
         SELECT COUNT(*) as totalWrites,
                SUM(relations_added) as totalRelations,
                SUM(entities_added) as totalEntities,
                CAST(AVG(latency_ms) AS INTEGER) as avgLatencyMs
-        FROM graph_events
-      `).get() as any;
+        FROM graph_events${agentFilterWhere}
+      `).get(...agentParams) as any;
 
       return {
         summary: {
@@ -370,12 +384,12 @@ export class FoxAnalyticsDB {
     return (result.changes as number) > 0;
   }
 
-  insertGraphLinks(vectorMemoryId: string, nodeIds: string[], edgeIds: string[], userId?: string) {
+  insertGraphLinks(vectorMemoryId: string, nodeIds: string[], edgeIds: string[], userId?: string, agentId?: string) {
     const stmt = this.db.prepare(
-      "INSERT INTO memory_graph_links (vector_memory_id, graph_node_id, graph_edge_id, user_id) VALUES (?, ?, ?, ?)"
+      "INSERT INTO memory_graph_links (vector_memory_id, graph_node_id, graph_edge_id, user_id, agent_id) VALUES (?, ?, ?, ?, ?)"
     );
-    for (const nodeId of nodeIds) stmt.run(vectorMemoryId, nodeId, null, userId ?? null);
-    for (const edgeId of edgeIds) stmt.run(vectorMemoryId, null, edgeId, userId ?? null);
+    for (const nodeId of nodeIds) stmt.run(vectorMemoryId, nodeId, null, userId ?? null, agentId ?? null);
+    for (const edgeId of edgeIds) stmt.run(vectorMemoryId, null, edgeId, userId ?? null, agentId ?? null);
   }
 
   getLinkedNodeIds(vectorMemoryId: string): string[] {
