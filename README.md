@@ -18,7 +18,7 @@ Long-term memory API for self-hosted AI applications.
 
 ## Requirements
 
-- **Docker** (recommended) — or Node.js 22+ for local dev
+- **Docker** (recommended) — or Node.js 22.23.4 LTS for local dev (`.nvmrc`)
 - **OpenAI-compatible inference** — hosted OpenAI, local Ollama, or [foxmemory-infer](../foxmemory-infer)
 - **Qdrant** — the Docker image bundles an embedded Qdrant binary (simplest path); a separate container is also supported
 
@@ -83,10 +83,11 @@ docker compose -f path/to/compose.one.yml up -d
 
 ### Option C — Local dev
 
-**1. Install Node.js 22+**
+**1. Install the patched Node.js 22 baseline**
 
 ```bash
-node --version   # must be 22+
+nvm use          # Node 22.23.4, pinned in .nvmrc
+node --version
 ```
 
 **2. Install dependencies**

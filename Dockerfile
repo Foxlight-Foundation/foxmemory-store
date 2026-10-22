@@ -3,7 +3,7 @@ FROM qdrant/qdrant:v1.17.0 AS qdrant
 # ── Build stage ──────────────────────────────────────────────────────────────
 # python3/make/g++ are needed only to compile sqlite3 native bindings.
 # They are NOT copied to the runtime stage.
-FROM node:22-alpine AS builder
+FROM node:22.23.4-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache python3 make g++ && npm install -g npm@latest
 COPY package.json .npmrc tsconfig.json ./
@@ -14,7 +14,7 @@ RUN --mount=type=secret,id=npm_token \
     sed -i '/_authToken/d' .npmrc
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
-FROM node:22-alpine
+FROM node:22.23.4-alpine
 RUN npm install -g npm@latest \
  && addgroup -S app && adduser -S app -G app
 WORKDIR /app
