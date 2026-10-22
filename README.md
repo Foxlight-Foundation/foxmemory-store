@@ -22,6 +22,10 @@ Long-term memory API for self-hosted AI applications.
 - **OpenAI-compatible inference** — hosted OpenAI, local Ollama, or [foxmemory-infer](../foxmemory-infer)
 - **Qdrant** — the Docker image bundles an embedded Qdrant binary (simplest path); a separate container is also supported
 
+Docker builds use the npm version bundled with the pinned Node release. CI
+builds the final runtime image, which opens an in-memory SQLite database as the
+runtime user to verify its native binding before publication.
+
 ---
 
 ## Getting started
