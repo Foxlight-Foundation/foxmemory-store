@@ -26,6 +26,10 @@ Docker builds use the npm version bundled with the pinned Node release. CI
 builds the final runtime image, which opens an in-memory SQLite database as the
 runtime user to verify its native binding before publication.
 
+Existing analytics databases are upgraded additively at startup. Columns are
+added before their indexes, preserving stored events and runtime configuration.
+`npm run build && npm test` checks startup and restart against an older schema.
+
 ---
 
 ## Getting started
