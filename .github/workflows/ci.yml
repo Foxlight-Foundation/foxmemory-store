@@ -15,6 +15,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: npm run build
+      - run: npm test
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Validate runtime image and native SQLite binding

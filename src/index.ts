@@ -1663,7 +1663,6 @@ class FoxAnalyticsDB {
       CREATE INDEX IF NOT EXISTS idx_we_ts    ON write_events(ts);
       CREATE INDEX IF NOT EXISTS idx_we_event ON write_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_we_user  ON write_events(user_id);
-      CREATE INDEX IF NOT EXISTS idx_we_call  ON write_events(call_id);
 
       CREATE TABLE IF NOT EXISTS search_events (
         id           TEXT PRIMARY KEY,
@@ -1729,6 +1728,8 @@ class FoxAnalyticsDB {
     ]) {
       try { this.db.exec(sql); } catch { /* column already exists */ }
     }
+    // Older databases do not have call_id until the additive migration above.
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_we_call ON write_events(call_id)");
     this.ready = true;
   }
 

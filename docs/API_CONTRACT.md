@@ -440,6 +440,10 @@ Notes:
 
 Rich analytics from the foxmemory-store SQLite analytics DB. Designed for dashboard bar charts, activity feeds, and search quality monitoring.
 
+On startup, existing analytics databases receive additive column migrations
+before indexes are created. Historical events and persisted configuration remain
+available across upgrades and restarts.
+
 Query params:
 - `days` (default: 30, max: 365) — lookback window for `byDay`, `searches.byDay`, and `recentActivity`.
 
